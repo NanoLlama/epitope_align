@@ -173,3 +173,52 @@ def test_unloadable_candidates_stop_the_run_loudly(synthetic_inputs, tmp_path, c
     assert "INPUT IGNORED - NOTHING WAS RUN" in message
     assert "no such file" in message
     assert not (tmp_path / "out" / "report.md").exists()
+
+
+def test_candidates_are_written_into_the_alignment(synthetic_inputs, tmp_path):
+    """Acceptance check: 4 scored + 9 candidates must be 13 in alignment.fasta.
+
+    They are not part of the scored panel, but they were aligned, and writing
+    them out is what lets you verify a candidate is the ortholog you meant
+    before acting on the advice.
+    """
+    from epitope_map import demo
+    from epitope_map.io_seq import parse_fasta
+    from epitope_map.pipeline import RunConfig, run_pipeline
+    from epitope_map.report import write_all
+
+    seqs, _ = demo.species_sequences(outgroup=True)
+    candidates = tmp_path / "candidates.fasta"
+    candidates.write_text(
+        f">guinea_pig_like\n{seqs['outgroup']}\n>second_candidate\n{seqs['human']}\n"
+    )
+
+    result = run_pipeline(
+        RunConfig(
+            sequences=str(synthetic_inputs["sequences"]),
+            binding=str(synthetic_inputs["binding"]),
+            reference="mouse",
+            structure=str(synthetic_inputs["structure"]),
+            topology="whole-chain",
+            candidate_species=[str(candidates)],
+            outdir=tmp_path / "out",
+        )
+    )
+    text = write_all(result, result.config.outdir)["alignment"].read_text()
+    headers = [line for line in text.splitlines() if line.startswith(">")]
+
+    scored = len(result.dataset.records)
+    assert len(headers) == scored + 2
+
+    candidate_headers = [h for h in headers if "candidate ortholog" in h]
+    assert len(candidate_headers) == 2
+    assert all("not scored" in h for h in candidate_headers)
+
+    # the label is still the first whitespace-delimited field, so the file reads
+    # back into the tool unchanged
+    names = [r.name for r in parse_fasta(text.replace("-", ""))]
+    assert names[-2:] == ["guinea_pig_like", "second_candidate"]
+
+    # and they stayed out of the scoring
+    assert "guinea_pig_like" not in {r.name for r in result.dataset.records}
+    assert all(len(s) == result.alignment.length for s in result.candidate_alignments.values())

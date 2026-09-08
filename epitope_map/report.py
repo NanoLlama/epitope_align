@@ -488,7 +488,24 @@ def _escape(text: str) -> str:
 
 
 def write_alignment(result: RunResult, path: Path) -> Path:
-    path.write_text(result.alignment.to_fasta())
+    """The MSA actually used, plus any candidate orthologs that were priced.
+
+    Candidates are not part of the scored panel - they have no binding data -
+    but they were aligned, and writing them here is what lets you check that a
+    candidate really is the ortholog you meant before acting on the advice.
+    Their headers say so, and the label is still the first whitespace-delimited
+    field, so the file reads back into this tool unchanged.
+    """
+    text = result.alignment.to_fasta()
+    for name, aligned in result.candidate_alignments.items():
+        text += f">{name} candidate ortholog - priced for panel advice, not scored\n"
+        for index in range(0, len(aligned), 60):
+            text += aligned[index : index + 60] + "\n"
+    return _write(path, text)
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text)
     return path
 
 

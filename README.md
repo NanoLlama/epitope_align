@@ -145,7 +145,7 @@ reference must be a binder - numbering and structure are anchored to it.
 | `divergence.svg` | discrimination along the chain with domains, disordered regions and top patches marked |
 | `report.md` | run parameters, alignment stats, how much signal there is, the narrowing table, top patches, glycosylation, next experiments, warnings, caveats |
 | `session.pml` | PyMOL session: composite score painted white to red, top patches coloured, view set |
-| `alignment.fasta` | the MSA actually used |
+| `alignment.fasta` | the MSA actually used, plus any candidate orthologs that were priced (labelled, and not part of the scored panel) |
 
 ## How it works
 

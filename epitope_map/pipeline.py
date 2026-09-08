@@ -152,6 +152,7 @@ class RunResult:
     structural_domains: List[StructuralDomain] = field(default_factory=list)
     domain_source: str = "none"
     identity_windows: List[IdentityWindow] = field(default_factory=list)
+    candidate_alignments: Dict[str, str] = field(default_factory=dict)
     radius_sensitivity: List[Dict[str, object]] = field(default_factory=list)
     merged_surfaces: List[Dict[str, object]] = field(default_factory=list)
     promoted_singletons: List[Patch] = field(default_factory=list)
@@ -827,6 +828,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
         structural_domains=structural_domains,
         domain_source=domain_source,
         identity_windows=list(identity_windows),
+        candidate_alignments=candidate_alignments,
         radius_sensitivity=sweep,
         merged_surfaces=surfaces,
         promoted_singletons=promoted,
