@@ -113,6 +113,11 @@ cyno,unknown
 `unknown` is for species you have sequences for but no binding data; they are
 shown but not used for scoring. You need at least one binder and one non-binder.
 
+In the Colab notebook this goes in a single-line box instead of a file, so the
+same thing is written on one line — `mouse=binder, rat=binder, human=non_binder`.
+Semicolons work as well as commas, `yes`/`no` are accepted, and the notebook
+prints back what it understood before anything runs.
+
 **3. A reference species.** One of the binders — everything in the results is
 numbered according to it.
 
