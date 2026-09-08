@@ -15,10 +15,15 @@ computers; you only ever press play buttons and fill in boxes.
 
 **[▶ Open the notebook in Colab](https://colab.research.google.com/github/NanoLlama/epitope_align/blob/claude/antibody-epitope-identification-ervnyf/notebooks/epitope_mapping.ipynb)**
 
+**Click "Copy to Drive" at the top of the page before you type anything.** A
+notebook opened straight from GitHub is a read-only preview, so edits may not
+stick; that button gives you your own saved copy. (`File → Save a copy in Drive`
+does the same.)
+
 Then work down the page, pressing ▶ on each grey box in order. The first one
 installs the tool (about two minutes); the second runs a built-in example so you
-can confirm everything works before using your own data; the rest are boxes you
-type your own species and structure into.
+can confirm everything works before using your own data; in the third you edit a
+few lines of text between quote marks to describe your own species.
 
 You will need a Google account, and Colab will ask you to confirm before running
 a notebook it did not write — that prompt is normal.
