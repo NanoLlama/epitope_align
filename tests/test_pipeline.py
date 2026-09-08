@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import synthetic
+from epitope_map import demo as synthetic
 from epitope_map.io_seq import InputError
 from epitope_map.pipeline import RunConfig, run_pipeline
 from epitope_map.report import write_all

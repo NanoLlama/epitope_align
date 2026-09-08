@@ -160,7 +160,7 @@ def evaluate(result: RunResult, truth: Sequence[str], case: str) -> BenchmarkMet
 
 
 def run_synthetic(outdir: Path) -> BenchmarkMetrics:
-    import synthetic
+    from epitope_map import demo as synthetic
 
     inputs = synthetic.write_inputs(outdir / "inputs")
     config = RunConfig(
@@ -182,7 +182,7 @@ def run_scaling(outdir: Path) -> List[Dict[str, object]]:
     with an extra rodent that carries the planted substitutions (so the binding
     pattern no longer follows the sequence tree).
     """
-    import synthetic
+    from epitope_map import demo as synthetic
 
     rows: List[Dict[str, object]] = []
     for label, informative in (("two clades", False), ("+1 informative species", True)):

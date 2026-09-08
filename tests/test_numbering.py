@@ -2,7 +2,7 @@
 
 import pytest
 
-import synthetic
+from epitope_map import demo as synthetic
 from epitope_map.align import AlignmentError, Alignment, ResidueMap, align_sequences
 from epitope_map.io_seq import SpeciesRecord
 from epitope_map.structure import load_structure

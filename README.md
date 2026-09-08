@@ -15,6 +15,11 @@ surface patches** with the experiments that would test them.
 The output is a hypothesis list for chimera and point-mutant design. It is not a
 prediction of the epitope, and the report says so in every run.
 
+**Not a programmer?** Start with
+[GETTING_STARTED.md](GETTING_STARTED.md) — it walks through running this in a
+browser via Google Colab (`notebooks/epitope_mapping.ipynb`, nothing to install)
+or on your own machine, what to gather, and how to read the output.
+
 ## Install
 
 ```bash
@@ -31,6 +36,14 @@ Optional external tools, all auto-detected:
 | `mkdssp` | secondary structure for chimera boundaries | boundaries are geometric only, and say so |
 
 ## Quickstart
+
+```bash
+epitope-map --demo                     # worked example with a known answer
+```
+
+`--demo` writes a full set of inputs and results into `demo-run/`, and its top
+patch should be exactly the eight residues it names — a one-command check that
+the install is healthy. To drive the same example from files:
 
 ```bash
 python examples/make_example.py        # writes a runnable synthetic dataset

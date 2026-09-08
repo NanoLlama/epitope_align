@@ -1,0 +1,212 @@
+# Getting started (no coding required)
+
+This tool takes a protein that your antibody binds in some species but not in
+others, and gives you back a **shortlist of surface patches** that could explain
+the difference — plus the chimeras and point mutants that would test each one.
+
+There are two ways to run it. Pick one.
+
+---
+
+## Route A — in your browser, using Google Colab (recommended)
+
+Nothing to install. Colab is a free Google service that runs code on Google's
+computers; you only ever press play buttons and fill in boxes.
+
+1. **Get the code.** Open
+   <https://github.com/NanoLlama/epitope_align>, switch the branch dropdown to
+   `claude/antibody-epitope-identification-ervnyf`, click the green **Code**
+   button, then **Download ZIP**. Keep that file where you can find it.
+2. **Get the notebook.** In that same repository, open
+   `notebooks/epitope_mapping.ipynb` and download it (the download button is at
+   the top right of the file view).
+3. **Open Colab.** Go to <https://colab.research.google.com>, choose
+   **Upload**, and pick the notebook file you just downloaded.
+4. **Work down the notebook**, pressing ▶ on each grey box in order. The first
+   one asks you for the ZIP from step 1; the second runs a built-in example so
+   you can confirm everything works before using your own data.
+
+The notebook explains each box as you reach it. Because it runs on Google's
+machines it has internet access, so it can fetch sequences from UniProt and
+structures from AlphaFold or the Protein Data Bank for you.
+
+---
+
+## Route B — on your own computer
+
+You need Python 3.11 or newer.
+
+- **macOS:** open **Terminal** (⌘-space, type "terminal"). Type `python3
+  --version`. If it says 3.11 or higher you are set; otherwise install Python
+  from <https://www.python.org/downloads/>.
+- **Windows:** install Python from <https://www.python.org/downloads/>, ticking
+  **"Add python.exe to PATH"** on the first screen of the installer. Then open
+  **Command Prompt**.
+
+Then, in that terminal window, one line at a time:
+
+```bash
+git clone https://github.com/NanoLlama/epitope_align.git
+cd epitope_align
+git checkout claude/antibody-epitope-identification-ervnyf
+pip install -e .
+```
+
+(No `git`? Download the ZIP from GitHub as in Route A, unzip it, and in the
+terminal type `cd ` followed by dragging the unzipped folder onto the window,
+then press enter and run the `pip install -e .` line.)
+
+Check it worked:
+
+```bash
+epitope-map --demo
+```
+
+That runs a made-up example with a known answer — six invented species, three
+that bind and three that do not, with an epitope planted at residues 65, 66, 68,
+70, 72, 114, 116 and 118. If the top patch it prints is exactly those, you are
+ready. It also writes a full set of result files into a `demo-run` folder so you
+can see what real output looks like.
+
+**Two optional extras that improve the results.** On macOS with
+[Homebrew](https://brew.sh): `brew install mafft brewsci/bio/dssp`. MAFFT gives
+a proper multi-species alignment (without it the tool falls back to a cruder
+method and says so loudly); DSSP lets it avoid proposing chimera boundaries that
+cut a helix in half. Neither is required.
+
+---
+
+## What you need to gather
+
+This is the actual work — the software is the easy part.
+
+**1. The sequences,** one per species. The simplest way is UniProt accession
+numbers: search your protein plus a species name at <https://www.uniprot.org>,
+and take the code at the top of the entry (something like `P21589`). You write
+them as a list with your own labels:
+
+```
+mouse=Q61503,rat=P21590,human=P21589
+```
+
+Three species is the minimum. Six to eight is far better, for a reason explained
+below. If you already have the sequences in a FASTA file, you can use that
+instead.
+
+**2. Your binding results,** as a small table — one line per species, using the
+same labels:
+
+```
+species,binding
+mouse,binder
+rat,binder
+human,non_binder
+marmoset,non_binder
+cyno,unknown
+```
+
+`unknown` is for species you have sequences for but no binding data; they are
+shown but not used for scoring. You need at least one binder and one non-binder.
+
+**3. A reference species.** One of the binders — everything in the results is
+numbered according to it.
+
+**4. A 3D structure of that reference species.** Any of:
+
+- an AlphaFold model, written as `AF-` plus the reference species' UniProt
+  accession plus `-F1` — for example `AF-Q61503-F1`. Every UniProt entry links
+  its AlphaFold model, and almost every protein has one.
+- a Protein Data Bank ID like `4H2I`, if someone has solved the structure
+  experimentally
+- your own `.pdb` or `.cif` file
+
+**5. Optionally, the region you care about** — for a cell-surface receptor,
+usually the part outside the cell. Written as `25-240`, in the structure's own
+numbering. Leave it out to analyse the whole thing.
+
+Then the whole run is one line:
+
+```bash
+epitope-map \
+  --sequences mouse=Q61503,rat=P21590,human=P21589 \
+  --binding binding.csv \
+  --reference mouse \
+  --structure AF-Q61503-F1 \
+  --ectodomain 25-240 \
+  --outdir results
+```
+
+---
+
+## Reading the results
+
+Open **`results/report.md`** first — it is written to be read start to finish.
+Four parts matter most:
+
+**"How much signal is there?"** Read this before anything else. If your binders
+are all rodents and your non-binders are all primates, then *every* position
+where rodents and primates happen to differ looks meaningful, and there will be
+50–150 of them. The report says so plainly and tells you how much of what you
+are seeing is explainable by chance. A run flagged this way is not wrong, but
+its shortlist is weak.
+
+**"Narrowing"** shows how many candidate residues survive each filter, so you can
+see where the shortlist actually came from.
+
+**"Top candidate patches"** is the answer: groups of residues that sit together
+on the surface, are conserved in the species that bind and changed in the ones
+that do not. Each lists its members, how exposed they are, and how chemically
+drastic the substitutions are.
+
+**"Suggested next experiments"** turns each patch into lab work: which segments
+to swap between species, and which point mutants to make. Prioritise the
+**gain-of-binding** mutants — putting a binder's residue into a species that
+does not bind. If that restores binding, it is hard to argue with. Loss of
+binding on its own can just mean you broke the protein.
+
+The other files: `patches.tsv` and `residues.tsv` are spreadsheets (open them in
+Excel — they are tab-separated) with every number behind the report;
+`mutants.tsv` and `chimeras.tsv` are the experiment lists; `session.pml` opens
+your structure in PyMOL with the candidate patches coloured in.
+
+---
+
+## Things worth knowing before you trust it
+
+- **It is a shortlist, not an answer.** The report says this in several places
+  and means it. The output is there to make your next ten experiments smarter,
+  not to replace them.
+- **More species is the single biggest improvement available.** Especially a
+  species that breaks the pattern — a rodent that does *not* bind, or a primate
+  that does. Each informative species roughly halves the candidate list, which
+  no amount of cleverness in the software can match.
+- **The cause need not be inside the footprint.** A change just outside the
+  contact area can move a loop; a sugar attached nearby can block the antibody
+  from several ångströms away. The tool flags both situations rather than hiding
+  them.
+- **Warnings are information, not failure.** Every run prints the specific
+  limitations of that run. They are worth reading.
+
+---
+
+## If something goes wrong
+
+**"command not found: epitope-map"** — the install did not finish, or a new
+terminal window lost it. Re-run `pip install -e .` from inside the project
+folder.
+
+**"reference species ... is marked non_binder"** — the reference has to be a
+species the antibody binds.
+
+**"binding call for X has no matching sequence"** — a label in your binding table
+does not match any sequence label. Check the spelling.
+
+**"reference sequence and structure disagree at ..."** — the structure is not of
+the species you named as reference, or it is the right protein but the wrong
+chain. Try adding `--chain A` (or B, C…). The message lists the mismatches so
+you can see what happened.
+
+**Anything about "unable to fetch"** — the computer running the tool cannot
+reach UniProt or the PDB. In Colab this should not happen; on a work laptop
+behind a firewall it might. Download the files by hand and point at them
+instead.

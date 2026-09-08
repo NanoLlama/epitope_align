@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import synthetic  # noqa: E402
+from epitope_map import demo as synthetic  # noqa: E402
 
 from epitope_map.pipeline import RunConfig, run_pipeline  # noqa: E402
 

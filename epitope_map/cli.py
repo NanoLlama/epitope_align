@@ -44,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="run the built-in worked example end to end and write its results "
+        "to --outdir; use this to check the installation works before "
+        "assembling your own inputs",
+    )
     parser.add_argument("--config", type=Path, help="YAML config file with the same keys")
     parser.add_argument(
         "--sequences",
@@ -136,6 +143,20 @@ def _split_list(value) -> List[str]:
     return [v.strip() for v in str(value).split(",") if v.strip()]
 
 
+def demo_config(outdir: Path) -> RunConfig:
+    """Write the built-in example's input files and point a run at them."""
+    from . import demo
+
+    inputs = demo.write_inputs(Path(outdir) / "example-inputs")
+    return RunConfig(
+        sequences=str(inputs["sequences"]),
+        binding=str(inputs["binding"]),
+        reference="mouse",
+        structure=str(inputs["structure"]),
+        outdir=Path(outdir) / "results",
+    )
+
+
 def config_from_args(args: argparse.Namespace) -> RunConfig:
     values: Dict[str, object] = {}
     if args.config:
@@ -143,7 +164,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
 
     parser = build_parser()
     for key, value in vars(args).items():
-        if key in ("config", "quiet"):
+        if key in ("config", "quiet", "demo"):
             continue
         if value is None:
             continue
@@ -201,7 +222,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config = config_from_args(args)
+        if args.demo:
+            outdir = args.outdir if args.outdir != Path("results") else Path("demo-run")
+            config = demo_config(outdir)
+        else:
+            config = config_from_args(args)
         result = run_pipeline(config)
         paths = write_all(result, config.outdir)
     except (InputError, AlignmentError, StructureError) as exc:
@@ -209,6 +234,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     if not args.quiet:
+        if args.demo:
+            print(
+                "Demo run: six invented species (three that bind, three that do "
+                "not) against a toy structure with a known answer.\n"
+                "The eight residues of the planted epitope are S65, R66, T68, "
+                "K70, D72, E114, R116 and E118 - the top patch below should be "
+                "exactly those.\n"
+                "The warnings are expected: they describe the honest limits of "
+                "this toy example, and a real run prints its own.\n"
+            )
         print(f"epitope-map {__version__}")
         print(
             f"{len(result.residues)} reference residues, "
@@ -230,6 +265,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         for name, path in paths.items():
             print(f"wrote {path}")
+        if args.demo:
+            print(
+                "\nInstallation looks healthy. Open "
+                f"{paths['report']} to see the kind of write-up a real run "
+                "produces, then read GETTING_STARTED.md to assemble your own "
+                "inputs."
+            )
     return 0
 
 

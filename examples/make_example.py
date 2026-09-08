@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests"))
 
-import synthetic  # noqa: E402
+from epitope_map import demo as synthetic  # noqa: E402
 
 
 def main() -> int:

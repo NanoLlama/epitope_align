@@ -1,10 +1,12 @@
-"""Deterministic synthetic benchmark: a planted epitope on a toy structure.
+"""A deterministic worked example: a planted epitope on a toy structure.
 
-Used by the tests and by ``examples/`` so both run offline. The structure is a
-hollow sphere of residues with a buried core; a chosen set of sequence positions
-is placed inside one spatial cap, and the non-binder species carry drastic
-substitutions there plus neutral noise elsewhere. A correct pipeline should rank
-the cap first.
+This is what ``epitope-map --demo`` runs, what ``examples/`` writes out, and what
+the test suite checks against. Nothing here is fetched or random: the structure
+is a packed ball of residues with a buried core, a chosen set of sequence
+positions is placed inside one surface cap, and the non-binder species carry
+drastic substitutions there plus neutral drift elsewhere. A correct pipeline
+should rank the cap first, which is exactly what a real run should do with a
+real epitope.
 """
 
 from __future__ import annotations

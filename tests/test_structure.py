@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import synthetic
+from epitope_map import demo as synthetic
 from epitope_map.structure import ResidueKey, StructureError, load_structure
 
 ATOM = (

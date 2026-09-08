@@ -136,3 +136,18 @@ def test_pairwise_fallback_warns_loudly(synthetic_inputs, tmp_path):
     result = run_pipeline(config)
     assert result.alignment.method == "biopython-pairwise-to-reference"
     assert any("NO TRUE MSA" in w for w in result.warnings)
+
+
+def test_demo_flag_runs_end_to_end(tmp_path, capsys):
+    """The one-command check a non-coder is told to run first."""
+    from epitope_map import demo
+
+    assert main(["--demo", "--outdir", str(tmp_path)]) == 0
+    results = tmp_path / "results"
+    for name in ("report.md", "patches.tsv", "residues.tsv", "session.pml"):
+        assert (results / name).exists()
+    output = capsys.readouterr().out
+    assert "Installation looks healthy" in output
+    # the banner promises these residues; the run must actually produce them
+    for number in demo.truth_numbers():
+        assert number in output
