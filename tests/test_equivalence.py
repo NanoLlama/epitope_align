@@ -1,7 +1,5 @@
 """Residue equivalences from superposed structures."""
 
-import warnings
-
 import pytest
 
 from epitope_map import demo

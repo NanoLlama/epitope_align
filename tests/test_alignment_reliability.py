@@ -9,7 +9,6 @@ import pytest
 
 from epitope_map.align import (
     CONFIDENCE_CUTOFF,
-    Alignment,
     align_sequences,
     alignment_confidence,
     local_identity,
@@ -82,7 +81,6 @@ def test_conserved_alignment_is_confident_throughout():
 
 
 def test_unverified_mutants_are_marked_and_deprioritised():
-    from epitope_map.patches import Patch
     from epitope_map.score import ResidueAnalysis
     from epitope_map.suggest import _reliability
 
