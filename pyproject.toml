@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epitope-map"
+version = "0.1.0"
+description = "Comparative epitope mapping from cross-species antibody binding data"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "biopython>=1.81",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "requests>=2.28",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# freesasa is preferred when it builds on the platform; Biopython's
+# Shrake-Rupley implementation is used automatically when it is absent.
+sasa = ["freesasa>=2.2"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+epitope-map = "epitope_map.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["epitope_map*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

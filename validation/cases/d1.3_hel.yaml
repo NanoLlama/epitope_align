@@ -1,0 +1,33 @@
+# Benchmark case: monoclonal D1.3 against lysozyme C orthologs.
+#
+# Ground truth is taken from the solved complex, not from anyone's memory of
+# which residues matter: `complex_*` below makes the harness recompute the
+# epitope as every antigen residue with a heavy atom within `contact_cutoff` of
+# the Fv chains of PDB 1VFB (chains A and B are the D1.3 Fv, chain C is hen egg
+# lysozyme).
+#
+# NOTE ON THE BINDING TABLE. Only two species are listed, which is deliberately
+# too few - the tool will (correctly) report the comparison as degenerate and
+# the ranking as weak. Before using this as a real benchmark, extend
+# `binding_d1.3.csv` and `sequences` with further lysozyme orthologs whose D1.3
+# reactivity you have verified in the literature (bobwhite quail lysozyme, which
+# differs from the hen protein at Gln121, is the classic informative one). Do
+# not treat the two rows shipped here as a validated cross-species panel.
+name: D1.3 vs lysozyme C orthologs
+sequences: chicken=P00698,human=P61626
+binding: binding_d1.3.csv
+reference: chicken
+structure: 1VFB
+chain: C
+
+complex_structure: 1VFB
+complex_antigen_chain: C
+complex_partner_chains: [A, B]
+contact_cutoff: 4.5
+
+notes: >-
+  Chicken lysozyme C (P00698) carries an 18-residue signal peptide, so UniProt
+  numbering runs 18 ahead of the PDB numbering of the mature protein; the run
+  should report that offset rather than silently mis-map. Structure and
+  sequences are fetched from RCSB and UniProt, so this case needs outbound
+  network access.

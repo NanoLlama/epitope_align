@@ -1,0 +1,7 @@
+species,binding
+mouse,binder
+rat,binder
+hamster,binder
+human,non_binder
+marmoset,non_binder
+macaque,non_binder

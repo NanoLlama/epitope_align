@@ -1,0 +1,24 @@
+# Config-file form of the CLI. Every key matches a --flag (dashes or
+# underscores both work); anything passed on the command line wins over the
+# value here, so a run can be repeated with one tweak:
+#
+#   epitope-map --config examples/run.yaml --patch-radius 10
+#
+# Generate the input files first with:  python examples/make_example.py
+
+sequences: examples/synthetic/species.fasta
+binding: examples/synthetic/binding.csv
+reference: mouse
+structure: examples/synthetic/reference.pdb
+outdir: examples/synthetic/results
+
+# analysis window, in the structure's author numbering (see
+# --ectodomain-numbering to use reference sequence positions instead)
+ectodomain: 25-144
+
+rsa-cutoff: 0.20
+discrimination-cutoff: 0.25
+patch-radius: 12.0
+min-patch-size: 2
+glycan-radius: 12.0
+top-n: 5
