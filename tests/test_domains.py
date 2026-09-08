@@ -1,7 +1,5 @@
 """Structural domain decomposition from the contact graph."""
 
-import pytest
-
 from epitope_map import demo
 from epitope_map.domains import StructuralDomain, decompose, describe
 from epitope_map.structure import load_structure
@@ -38,10 +36,7 @@ def test_domains_may_be_discontinuous():
     assert domain.size == 6
 
 
-def test_describe_uses_reference_numbering(tmp_path):
-    paths = demo.write_inputs(tmp_path / "one")
-    model = load_structure(str(paths["structure"]))
-
+def test_describe_uses_reference_numbering():
     class FakeMap:
         def number_of(self, index):
             return str(index + 25)

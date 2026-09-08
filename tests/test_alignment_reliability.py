@@ -8,7 +8,6 @@ a construct, so the pipeline has to know the difference.
 import pytest
 
 from epitope_map.align import (
-    CONFIDENCE_CUTOFF,
     MIN_DECORRELATED_METHODS,
     align_sequences,
     alignment_confidence,
