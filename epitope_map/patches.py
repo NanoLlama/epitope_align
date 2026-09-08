@@ -38,6 +38,10 @@ COMPACTNESS_FLOOR = 0.4
 #: than as independent hypotheses.
 EPITOPE_SCALE = 25.0
 
+#: A 15-22 residue epitope spans roughly 25-30 A, so a merged surface wider than
+#: this cannot be covered by one paratope however close its fragments are.
+EPITOPE_MAX_SPAN = 30.0
+
 #: Radii used by --radius-sweep when the user does not name their own.
 DEFAULT_RADIUS_SWEEP = (10.0, 12.0, 14.0, 16.0, 18.0)
 
@@ -416,10 +420,20 @@ def merged_surfaces(
             for b in members:
                 if a.centroid and b.centroid:
                     spread = max(spread, distance(a.centroid, b.centroid))
+        members.sort(key=lambda m: m.ref_index)
+        verdict = "plausible single epitope"
+        if spread > EPITOPE_MAX_SPAN or area > 1.5 * TYPICAL_EPITOPE_BSA[1]:
+            verdict = (
+                "too large for one antibody footprint - treat as neighbouring "
+                "surfaces, not one epitope"
+            )
+        elif len(members) > TYPICAL_EPITOPE_RESIDUES[1]:
+            verdict = "larger than a typical epitope; the true footprint is a subset"
         out.append(
             {
                 "patches": sorted(p.patch_id for p in group),
                 "n_residues": len(members),
+                "verdict": verdict,
                 "residues": [m.ref_number or str(m.ref_index + 1) for m in members],
                 "total_score": sum(m.composite for m in members),
                 "accessible_area_A2": area,

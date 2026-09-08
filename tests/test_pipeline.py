@@ -59,7 +59,8 @@ def test_two_clade_run_reports_weak_discrimination(synthetic_result):
 def test_outputs_are_all_written(synthetic_result, tmp_path):
     paths = write_all(synthetic_result, tmp_path)
     assert set(paths) == {
-        "residues", "patches", "chimeras", "mutants", "alignment", "pymol", "report"
+        "residues", "regions", "patches", "chimeras", "mutants", "alignment",
+        "divergence", "pymol", "report",
     }
     for path in paths.values():
         assert path.exists() and path.stat().st_size > 0
@@ -387,3 +388,98 @@ def test_disordered_stalk_does_not_produce_a_top_patch(tmp_path):
         m.ref_number in stalk for patch in kept.patches[:5] for m in patch.members
     )
     assert any("disordered region" in w for w in filtered.warnings)
+
+
+def test_region_table_exposes_a_divergence_hotspot(tmp_path):
+    """P2-1: the 34%-vs-9% contrast must be visible without the user computing it."""
+    from epitope_map.report import region_rows
+
+    inputs = synthetic.write_inputs(tmp_path / "stalk", disordered_stalk=True)
+    result = run_pipeline(
+        _config(inputs, tmp_path / "out", topology="whole-chain", keep_disordered=True)
+    )
+    rows = region_rows(result)
+    disorder = [row for row in rows if row["kind"] == "disorder"]
+    assert disorder, "the stalk should appear as its own region"
+    hotspot = disorder[0]
+    others = [row for row in rows if row["kind"] != "disorder"]
+    assert hotspot["percent_discriminating"] > max(
+        float(row["percent_discriminating"]) for row in others
+    )
+    assert float(hotspot["mean_plddt"]) < 50
+
+
+def test_enrichment_is_withheld_for_a_small_panel(synthetic_inputs, tmp_path):
+    """P2-5: '11.83x' off six labellings reads as a statistic and is not one."""
+    binding = tmp_path / "binding.csv"
+    binding.write_text(
+        "species,binding\nmouse,binder\nrat,binder\nhuman,non_binder\n"
+        "marmoset,non_binder\nhamster,unknown\nmacaque,unknown\n"
+    )
+    small = run_pipeline(
+        _config(synthetic_inputs, tmp_path / "small", binding=str(binding),
+                topology="whole-chain")
+    )
+    assert small.degeneracy.n_scored == 4
+    assert not small.degeneracy.enrichment_is_meaningful
+    assert small.degeneracy.is_degenerate  # unknown is not "fine"
+
+    full = run_pipeline(
+        _config(synthetic_inputs, tmp_path / "full", topology="whole-chain")
+    )
+    assert full.degeneracy.n_scored == 6
+    assert full.degeneracy.enrichment_is_meaningful
+
+    from epitope_map.report import write_report
+
+    text = write_report(small, tmp_path / "small.md").read_text()
+    assert "No enrichment figure is quoted" in text
+    assert "too few for the background rate to mean anything" in text
+
+
+def test_panel_advice_names_the_branch_worth_sampling(synthetic_result):
+    """P2-3: 'add species' is advice nobody can act on."""
+    advice = synthetic_result.panel_advice
+    assert advice
+    top = advice[0]
+    assert top["reduction"] > 0
+    assert "close relative of" in top["hypothetical_species"]
+    # a species that breaks the clade split beats one that reinforces it
+    binders = {r.name for r in synthetic_result.dataset.binders}
+    assert (top["closest_to"] in binders) == (top["binding"] == "non_binder")
+    assert advice == sorted(advice, key=lambda entry: -entry["reduction"])
+
+
+def test_chimera_crossing_the_membrane_is_rejected(synthetic_inputs, tmp_path):
+    """P2-2: a swap spanning the transmembrane helix is not a construct."""
+    result = run_pipeline(
+        _config(
+            synthetic_inputs,
+            tmp_path,
+            topology="cytoplasmic=1-40,tm=41-60,extracellular=61-120",
+        )
+    )
+    for chimera in result.chimeras:
+        covered = [
+            result.residues[i].topology
+            for segment in chimera.segments
+            for i in range(segment.start_ref_index, segment.end_ref_index + 1)
+        ]
+        if "transmembrane" in covered or "cytoplasmic" in covered:
+            assert not chimera.constructible
+            assert any("transmembrane" in p or "cytoplasmic" in p for p in chimera.problems)
+
+
+def test_divergence_plot_is_valid_svg(synthetic_result, tmp_path):
+    from xml.etree import ElementTree
+
+    from epitope_map.report import write_divergence_plot
+
+    path = write_divergence_plot(synthetic_result, tmp_path / "divergence.svg")
+    root = ElementTree.fromstring(path.read_text())
+    assert root.tag.endswith("svg")
+    assert path.read_text().count("<polyline") == 1
+    # top-patch members are marked
+    assert path.read_text().count("<circle") == sum(
+        p.size for p in synthetic_result.patches[: synthetic_result.config.top_n]
+    )

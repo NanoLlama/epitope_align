@@ -32,6 +32,7 @@ from .patches import (
 from .score import (
     DEFAULT_DISCRIMINATION_CUTOFF,
     indel_weight,
+    panel_advice,
     ColumnScore,
     DegeneracyReport,
     ResidueAnalysis,
@@ -439,6 +440,9 @@ def run_pipeline(config: RunConfig) -> RunResult:
             method=config.cluster_method,
             rsa_cutoff=config.rsa_cutoff,
         )
+    advice = panel_advice(
+        residue_map, dataset, cutoff=config.discrimination_cutoff, accessible=accessible
+    )
     chimeras = suggest_chimeras(patches, rows, residue_map, structure, top_n=config.top_n)
     mutants = suggest_mutants(patches, dataset, residue_map, top_n=config.top_n)
     counts = baseline_counts(rows, config.discrimination_cutoff)
@@ -514,5 +518,6 @@ def run_pipeline(config: RunConfig) -> RunResult:
         radius_sensitivity=sweep,
         merged_surfaces=surfaces,
         promoted_singletons=promoted,
+        panel_advice=advice,
         warnings=warnings_,
     )

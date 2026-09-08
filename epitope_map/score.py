@@ -273,6 +273,12 @@ def score_alignment(
 # --------------------------------------------------------------------------
 
 
+#: Below this many scored species there are too few alternative labellings for
+#: the background rate to mean anything, so the enrichment figure is withheld
+#: rather than quoted to two decimal places.
+MIN_SPECIES_FOR_ENRICHMENT = 6
+
+
 @dataclass
 class DegeneracyReport:
     """How much of the observed discrimination is explainable by chance."""
@@ -289,8 +295,28 @@ class DegeneracyReport:
     cutoff: float
 
     @property
+    def n_scored(self) -> int:
+        return self.n_binders + self.n_non_binders
+
+    @property
+    def enrichment_is_meaningful(self) -> bool:
+        """With four species there are a handful of relabellings; that is noise.
+
+        Quoting "11.83x enrichment" off six alternative labellings reads as a
+        statistic and is not one.
+        """
+        return (
+            self.n_scored >= MIN_SPECIES_FOR_ENRICHMENT
+            and self.n_labelings >= 10
+        )
+
+    @property
     def is_degenerate(self) -> bool:
-        return self.clade_split or self.enrichment < 1.5
+        if self.clade_split:
+            return True
+        if not self.enrichment_is_meaningful:
+            return True  # unknown, and unknown is not "fine"
+        return self.enrichment < 1.5
 
 
 def _fraction_discriminating(
@@ -609,3 +635,90 @@ class ResidueAnalysis:
         if self.plddt < 70:
             return "low_confidence"
         return ""
+
+
+# --------------------------------------------------------------------------
+# species panel advice
+# --------------------------------------------------------------------------
+
+
+def panel_advice(
+    residue_map,
+    dataset: Dataset,
+    cutoff: float = DEFAULT_DISCRIMINATION_CUTOFF,
+    accessible: Optional[Sequence[int]] = None,
+) -> List[Dict[str, object]]:
+    """Which additional ortholog would cut the candidate list most?
+
+    "Add more species" is advice nobody can act on. This asks a concrete
+    question instead: for each species already in the panel, what happens if the
+    next one tested turns out to be a close relative of *that* species carrying
+    the opposite binding outcome? The answer names the branch of the tree worth
+    sampling rather than gesturing at the tree.
+
+    The hypothetical relative is modelled as sequence-identical to the species it
+    sits next to, so every figure here is a **best case** - a real ortholog
+    differs at some positions and resolves fewer. Read the ranking, not the
+    absolute numbers.
+    """
+    binders = [r.name for r in dataset.binders]
+    non_binders = [r.name for r in dataset.non_binders]
+    if not binders or not non_binders:
+        return []
+
+    keep = set(accessible) if accessible is not None else None
+    columns = [
+        {name: residue_map.residue_at(name, ref_index) for name in
+         residue_map.alignment.sequences}
+        for ref_index in range(len(residue_map))
+        if keep is None or ref_index in keep
+    ]
+    if not columns:
+        return []
+
+    def count(binder_names: Sequence[str], non_binder_names: Sequence[str]) -> int:
+        hits = 0
+        for residues in columns:
+            score, _, _, _ = score_column(residues, binder_names, non_binder_names)
+            if score >= cutoff:
+                hits += 1
+        return hits
+
+    baseline = count(binders, non_binders)
+    advice: List[Dict[str, object]] = []
+    for relative in binders + non_binders:
+        opposite = "non_binder" if relative in binders else "binder"
+        hypothetical = f"{relative}-like-{opposite}"
+        columns_with = []
+        for residues in columns:
+            augmented = dict(residues)
+            augmented[hypothetical] = residues[relative]
+            columns_with.append(augmented)
+
+        new_binders = list(binders)
+        new_non_binders = list(non_binders)
+        (new_non_binders if opposite == "non_binder" else new_binders).append(
+            hypothetical
+        )
+
+        hits = 0
+        for residues in columns_with:
+            score, _, _, _ = score_column(residues, new_binders, new_non_binders)
+            if score >= cutoff:
+                hits += 1
+        advice.append(
+            {
+                "hypothetical_species": (
+                    f"a close relative of {relative} that does "
+                    f"{'not bind' if opposite == 'non_binder' else 'bind'}"
+                ),
+                "closest_to": relative,
+                "binding": opposite,
+                "candidates_now": baseline,
+                "candidates_after_best_case": hits,
+                "reduction": baseline - hits,
+                "reduction_fraction": (baseline - hits) / baseline if baseline else 0.0,
+            }
+        )
+    advice.sort(key=lambda entry: -int(entry["reduction"]))
+    return advice

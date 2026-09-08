@@ -111,3 +111,46 @@ def test_mismatched_structure_fails_loudly(mapped):
     message = str(excinfo.value)
     assert "disagree" in message
     assert "structure" in message  # the diff is shown, not swallowed
+
+
+def test_equivalences_round_trip_across_an_indel(mapped):
+    """Regression test 5: the offset shifted mid-patch in the real run.
+
+    Nothing verified it at the time. This walks every reference position of a
+    species carrying a deletion and checks that the residue the map names is
+    genuinely the residue at that position of that species' own sequence, and
+    that the offset changes exactly where the gap is.
+    """
+    residue_map, _, alignment = mapped
+    species = "macaque"  # the fixture gives macaque a three-residue deletion
+    sequence = alignment.sequences[species].replace("-", "")
+
+    offsets = set()
+    checked = 0
+    for position in residue_map.positions():
+        index = residue_map.species_index(species, position.ref_index)
+        if index is None:
+            continue  # gap: no equivalent residue, which is itself the answer
+        # the named position really is that residue in that species' own sequence
+        assert sequence[index - 1] == residue_map.residue_at(species, position.ref_index)
+        offsets.add(position.ref_index + 1 - index)
+        checked += 1
+
+    assert checked > 100
+    # the deletion means the offset is not constant - which is the trap
+    assert len(offsets) == 2, offsets
+    assert max(offsets) - min(offsets) == 3  # the three deleted residues
+
+
+def test_equivalence_is_none_exactly_where_the_gap_is(mapped):
+    residue_map, _, alignment = mapped
+    aligned = alignment.sequences["macaque"]
+    missing = [
+        position.ref_index
+        for position in residue_map.positions()
+        if residue_map.species_index("macaque", position.ref_index) is None
+    ]
+    assert len(missing) == 3
+    assert all(aligned[residue_map.column_of(i)] == "-" for i in missing)
+    # and they are contiguous, as a single deletion should be
+    assert missing == list(range(missing[0], missing[0] + 3))

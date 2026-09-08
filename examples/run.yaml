@@ -12,6 +12,10 @@ reference: mouse
 structure: examples/synthetic/reference.pdb
 outdir: examples/synthetic/results
 
+# Membrane topology. Without this (or --ectodomain) the run stops rather than
+# scoring residues an antibody cannot reach. The toy protein is soluble, so:
+topology: whole-chain
+
 # analysis window, in the structure's author numbering (see
 # --ectodomain-numbering to use reference sequence positions instead)
 ectodomain: 25-144
@@ -22,3 +26,6 @@ patch-radius: 12.0
 min-patch-size: 2
 glycan-radius: 12.0
 top-n: 5
+
+# re-cluster at several radii to see which patches are really one surface
+radius-sweep: 10,12,14,16,18
