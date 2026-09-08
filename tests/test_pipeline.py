@@ -8,6 +8,7 @@ import pytest
 from epitope_map import demo as synthetic
 from epitope_map.io_seq import InputError
 from epitope_map.pipeline import RunConfig, run_pipeline
+from epitope_map.topology import TopologyUnknown
 from epitope_map.report import write_all
 
 
@@ -109,6 +110,7 @@ def test_ectodomain_range_restricts_the_analysis(synthetic_inputs, tmp_path):
         binding=str(synthetic_inputs["binding"]),
         reference="mouse",
         structure=str(synthetic_inputs["structure"]),
+        topology="whole-chain",
         outdir=tmp_path,
         ectodomain=(60, 100),
     )
@@ -132,6 +134,7 @@ def test_unknown_species_is_aligned_but_not_scored(synthetic_inputs, tmp_path):
         binding=str(binding),
         reference="mouse",
         structure=str(synthetic_inputs["structure"]),
+        topology="whole-chain",
         outdir=tmp_path,
     )
     result = run_pipeline(config)
@@ -151,6 +154,7 @@ def test_missing_non_binder_is_rejected(synthetic_inputs, tmp_path):
         binding=str(binding),
         reference="mouse",
         structure=str(synthetic_inputs["structure"]),
+        topology="whole-chain",
         outdir=tmp_path,
     )
     with pytest.raises(InputError, match="non_binder"):
@@ -165,6 +169,7 @@ def test_an_informative_species_shrinks_the_candidate_set(tmp_path, synthetic_re
         binding=str(inputs["binding"]),
         reference="mouse",
         structure=str(inputs["structure"]),
+        topology="whole-chain",
         outdir=tmp_path / "out",
     )
     result = run_pipeline(config)
@@ -216,6 +221,7 @@ def test_partner_chain_masks_the_residues_it_covers(synthetic_inputs, tmp_path):
         structure=str(structure),
         chain="A",
         occluding_chains=["B"],
+        topology="whole-chain",
         outdir=tmp_path / "out",
     )
     result = run_pipeline(config)
@@ -238,6 +244,7 @@ def test_assembly_context_flags_interface_residues_end_to_end(synthetic_inputs, 
         structure=str(structure),
         chain="A",
         context_chains=["B"],
+        topology="whole-chain",
         outdir=tmp_path / "out",
     )
     result = run_pipeline(config)
@@ -245,3 +252,138 @@ def test_assembly_context_flags_interface_residues_end_to_end(synthetic_inputs, 
         r.ref_number for r in result.residues if "assembly_interface" in r.mask_reasons
     }
     assert interface & set(synthetic.truth_numbers())
+
+
+def _config(inputs, tmp_path, **kwargs):
+    base = dict(
+        sequences=str(inputs["sequences"]),
+        binding=str(inputs["binding"]),
+        reference="mouse",
+        structure=str(inputs["structure"]),
+        outdir=tmp_path / "out",
+    )
+    base.update(kwargs)
+    return RunConfig(**base)
+
+
+def test_run_refuses_when_topology_is_unknown(synthetic_inputs, tmp_path):
+    """Defaulting to the whole chain ranks residues an antibody cannot reach."""
+    with pytest.raises(TopologyUnknown) as excinfo:
+        run_pipeline(_config(synthetic_inputs, tmp_path))
+    message = str(excinfo.value)
+    assert "--topology" in message and "--ectodomain" in message
+    assert "whole-chain" in message
+    assert "120 residues" in message  # names the chain length it saw
+
+
+def test_ectodomain_alone_satisfies_the_topology_requirement(synthetic_inputs, tmp_path):
+    result = run_pipeline(_config(synthetic_inputs, tmp_path, ectodomain=(30, 140)))
+    assert result.patches or result.singletons
+
+
+def test_intracellular_residues_never_reach_a_patch(synthetic_inputs, tmp_path):
+    """Regression test 1: nothing below the extracellular boundary may rank."""
+    result = run_pipeline(
+        _config(
+            synthetic_inputs,
+            tmp_path,
+            topology="cytoplasmic=1-67,tm=68-88,extracellular=89-120",
+        )
+    )
+    inside = {
+        r.ref_number
+        for r in result.residues
+        if r.topology in ("cytoplasmic", "transmembrane")
+    }
+    assert inside, "the fixture should have residues on the wrong side"
+
+    ranked = {
+        m.ref_number
+        for patch in result.patches + result.singletons
+        for m in patch.members
+    }
+    assert not (ranked & inside)
+    # hard-excluded, not merely down-weighted
+    excluded = [r for r in result.residues if not r.accessible]
+    assert all(r.discrimination == 0.0 and r.composite == 0.0 for r in excluded)
+    assert all("outside_topology" in r.mask_reasons for r in excluded)
+    # and no sequon may be reported from there either
+    assert all(
+        s.ref_index is None or result.residues[s.ref_index].accessible
+        for s in result.glycans.sequons
+    )
+
+
+def test_sequons_outside_the_extracellular_range_are_rejected_and_counted(
+    synthetic_inputs, tmp_path
+):
+    """Regression test 1, glycan half: a cytoplasmic sequon is never occupied."""
+    whole = run_pipeline(
+        _config(synthetic_inputs, tmp_path / "whole", topology="whole-chain")
+    )
+    restricted = run_pipeline(
+        _config(
+            synthetic_inputs,
+            tmp_path / "restricted",
+            topology="cytoplasmic=1-80,extracellular=81-120",
+        )
+    )
+    assert len(restricted.glycans.sequons) < len(whole.glycans.sequons)
+    assert restricted.glycans.rejected_on_topology
+    assert any(
+        "never glycosylated" in w for w in restricted.glycans.warnings
+    )
+    # and the flags those sequons produced are gone with them
+    flagged = [r for r in restricted.residues if r.glycan_flags and not r.accessible]
+    assert not flagged
+
+
+def test_disordered_stalk_does_not_produce_a_top_patch(tmp_path):
+    """Regression test 2: a long low-pLDDT, high-divergence region is an artifact.
+
+    The stalk is the least constrained part of a protein, so it looks
+    discriminating; AlphaFold models it as an extended tether, so every residue
+    looks exposed. Left in, it floods the candidate list.
+    """
+    inputs = synthetic.write_inputs(tmp_path / "stalk", disordered_stalk=True)
+
+    filtered = run_pipeline(_config(inputs, tmp_path / "a", topology="whole-chain"))
+    kept = run_pipeline(
+        _config(inputs, tmp_path / "b", topology="whole-chain", keep_disordered=True)
+    )
+
+    assert filtered.structure.is_alphafold
+    assert filtered.structure.disordered_regions, "the stalk should be detected"
+    stalk = {r.ref_number for r in filtered.residues if r.in_disordered_region}
+    assert len(stalk) >= 20
+
+    in_top5 = [
+        m.ref_number
+        for patch in filtered.patches[:5]
+        for m in patch.members
+        if m.ref_number in stalk
+    ]
+    assert not in_top5, f"stalk residues reached the top patches: {in_top5}"
+    assert all(
+        "disordered_region" in r.mask_reasons
+        for r in filtered.residues
+        if r.in_disordered_region
+    )
+    # RSA inside the region is not reported as a usable number
+    assert all(
+        r.rsa != r.rsa for r in filtered.residues if r.in_disordered_region
+    )
+    # the planted epitope still comes first
+    assert set(synthetic.truth_numbers()) <= {
+        m.ref_number for m in filtered.patches[0].members
+    }
+
+    # and --keep-disordered genuinely overrides it, which is what makes the
+    # default a choice rather than a silent truncation
+    assert kept.counts["discriminating_and_exposed"] > filtered.counts[
+        "discriminating_and_exposed"
+    ]
+    assert any(
+        m.ref_number in stalk for patch in kept.patches[:5] for m in patch.members
+    )
+    assert any("disordered region" in w for w in filtered.warnings)

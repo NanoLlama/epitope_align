@@ -168,6 +168,7 @@ def run_synthetic(outdir: Path) -> BenchmarkMetrics:
         binding=str(inputs["binding"]),
         reference="mouse",
         structure=str(inputs["structure"]),
+        topology="whole-chain",
         outdir=outdir / "results",
     )
     result = run_pipeline(config)
@@ -193,6 +194,7 @@ def run_scaling(outdir: Path) -> List[Dict[str, object]]:
             binding=str(inputs["binding"]),
             reference="mouse",
             structure=str(inputs["structure"]),
+            topology="whole-chain",
             outdir=directory / "results",
         )
         result = run_pipeline(config)
@@ -231,6 +233,7 @@ def run_case(case_path: Path, outdir: Path) -> BenchmarkMetrics:
         reference=str(case["reference"]),
         structure=resolve(case["structure"]),
         chain=case.get("chain"),
+        topology="whole-chain",
         outdir=outdir / "results",
         ectodomain=tuple(case["ectodomain"]) if case.get("ectodomain") else None,
         cache_dir=Path(case.get("cache_dir", outdir / "cache")),

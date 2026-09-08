@@ -93,6 +93,7 @@ def test_main_writes_every_output(synthetic_inputs, tmp_path, capsys):
             "--binding", str(synthetic_inputs["binding"]),
             "--reference", "mouse",
             "--structure", str(synthetic_inputs["structure"]),
+            "--topology", "whole-chain",
             "--outdir", str(outdir),
         ]
     )
@@ -130,6 +131,7 @@ def test_pairwise_fallback_warns_loudly(synthetic_inputs, tmp_path):
         binding=str(synthetic_inputs["binding"]),
         reference="mouse",
         structure=str(synthetic_inputs["structure"]),
+        topology="whole-chain",
         outdir=tmp_path / "out",
         aligner="pairwise",
     )
@@ -151,3 +153,29 @@ def test_demo_flag_runs_end_to_end(tmp_path, capsys):
     # the banner promises these residues; the run must actually produce them
     for number in demo.truth_numbers():
         assert number in output
+
+
+def test_cli_stops_with_advice_when_topology_is_unknown(synthetic_inputs, tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--sequences", str(synthetic_inputs["sequences"]),
+                "--binding", str(synthetic_inputs["binding"]),
+                "--reference", "mouse",
+                "--structure", str(synthetic_inputs["structure"]),
+                "--outdir", str(tmp_path / "out"),
+            ]
+        )
+    assert excinfo.value.code == 2
+    message = capsys.readouterr().err
+    assert "--topology" in message and "whole-chain" in message
+
+
+def test_topology_flag_is_parsed_into_the_config(synthetic_inputs, tmp_path):
+    args = args_for(
+        synthetic_inputs, tmp_path,
+        extra=["--topology", "extracellular=90-763,tm=68-88", "--radius-sweep", "10,14,18"],
+    )
+    config = config_from_args(args)
+    assert config.topology == "extracellular=90-763,tm=68-88"
+    assert config.radius_sweep == [10.0, 14.0, 18.0]

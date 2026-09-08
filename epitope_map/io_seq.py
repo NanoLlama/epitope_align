@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ _UNIPROT_RE = re.compile(
     r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$"
 )
 _UNIPROT_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{acc}.fasta"
+_UNIPROT_JSON_URL = "https://rest.uniprot.org/uniprotkb/{acc}.json"
 
 _ALIAS_NORMALISER = re.compile(r"[^a-z0-9]+")
 
@@ -36,6 +38,11 @@ class SpeciesRecord:
     call: str = UNKNOWN
     source: str = "fasta"
     description: str = ""
+    accession: str = ""
+    #: Raw UniProt entry, when the sequence was fetched by accession. Carries the
+    #: TOPO_DOM/TRANSMEM/DOMAIN features the topology and domain annotation are
+    #: derived from, so a fetched reference needs no hand-written ranges.
+    features: Optional[dict] = None
 
     @property
     def is_binder(self) -> bool:
@@ -158,31 +165,73 @@ def parse_fasta(text: str) -> List[SpeciesRecord]:
     return records
 
 
-def _fetch_uniprot(accession: str, cache_dir: Optional[Path] = None) -> SpeciesRecord:
-    cache_file = None
-    if cache_dir is not None:
-        cache_dir = Path(cache_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{accession}.fasta"
-        if cache_file.exists():
-            return parse_fasta(cache_file.read_text())[0]
+def _uniprot_get(url: str, timeout: int = 60):
     try:
         import requests
     except ImportError as exc:  # pragma: no cover - requests is a declared dep
         raise InputError(
-            f"cannot fetch UniProt accession {accession}: requests is not installed"
+            f"cannot fetch {url}: requests is not installed"
         ) from exc
-    url = _UNIPROT_FASTA_URL.format(acc=accession)
-    response = requests.get(url, timeout=60)
-    if response.status_code != 200:
-        raise InputError(
-            f"UniProt fetch failed for {accession}: HTTP {response.status_code}"
-        )
-    if cache_file is not None:
-        cache_file.write_text(response.text)
-    record = parse_fasta(response.text)[0]
+    return requests.get(url, timeout=timeout)
+
+
+def _fetch_uniprot(accession: str, cache_dir: Optional[Path] = None) -> SpeciesRecord:
+    """Fetch a sequence and, alongside it, the entry's features.
+
+    The features are what make topology automatic; they are cached next to the
+    FASTA so a repeated run needs no network.
+    """
+    fasta_cache = json_cache = None
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        fasta_cache = cache_dir / f"{accession}.fasta"
+        json_cache = cache_dir / f"{accession}.json"
+
+    if fasta_cache is not None and fasta_cache.exists():
+        record = parse_fasta(fasta_cache.read_text())[0]
+    else:
+        response = _uniprot_get(_UNIPROT_FASTA_URL.format(acc=accession))
+        if response.status_code != 200:
+            raise InputError(
+                f"UniProt fetch failed for {accession}: HTTP {response.status_code}"
+            )
+        if fasta_cache is not None:
+            fasta_cache.write_text(response.text)
+        record = parse_fasta(response.text)[0]
+
     record.source = "uniprot"
+    record.accession = accession
+    record.features = _fetch_uniprot_features(accession, json_cache)
     return record
+
+
+def _fetch_uniprot_features(
+    accession: str, cache_file: Optional[Path]
+) -> Optional[dict]:
+    """The entry as JSON, or ``None`` if it could not be had.
+
+    Failure here is not fatal: without features the pipeline asks the user for
+    the topology instead of guessing.
+    """
+    if cache_file is not None and cache_file.exists():
+        try:
+            return json.loads(cache_file.read_text())
+        except json.JSONDecodeError:
+            pass
+    try:
+        response = _uniprot_get(_UNIPROT_JSON_URL.format(acc=accession))
+    except InputError:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if cache_file is not None:
+        cache_file.write_text(json.dumps(payload))
+    return payload
 
 
 def load_sequences(

@@ -32,6 +32,7 @@ def synthetic_config(synthetic_inputs, tmp_path_factory):
         binding=str(synthetic_inputs["binding"]),
         reference="mouse",
         structure=str(synthetic_inputs["structure"]),
+        topology="whole-chain",
         outdir=outdir,
     )
 

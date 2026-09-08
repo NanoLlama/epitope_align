@@ -27,6 +27,16 @@ from .score import (
     score_alignment,
 )
 from .structure import StructureModel, load_structure
+from .topology import (
+    Segment,
+    Topology,
+    domain_at,
+    load_domains_tsv,
+    parse_topology_spec,
+    parse_uniprot_features,
+    require_topology,
+    topology_from_range,
+)
 from .suggest import ChimeraSuggestion, MutantSuggestion, suggest_chimeras, suggest_mutants
 
 DEFAULT_RSA_CUTOFF = 0.20
@@ -43,6 +53,11 @@ class RunConfig:
     outdir: Path = Path("results")
     ectodomain: Optional[Tuple[int, int]] = None
     ectodomain_numbering: str = "structure"
+    topology: Optional[str] = None
+    domains: Optional[str] = None
+    keep_disordered: bool = False
+    radius_sweep: List[float] = field(default_factory=list)
+    prefer_assembly: bool = True
     chain: Optional[str] = None
     assembly_context: Optional[str] = None
     context_chains: List[str] = field(default_factory=list)
@@ -93,6 +108,12 @@ class RunResult:
     chimeras: List[ChimeraSuggestion]
     mutants: List[MutantSuggestion]
     counts: Dict[str, int]
+    topology: Topology = field(default_factory=Topology)
+    domain_segments: List[Segment] = field(default_factory=list)
+    radius_sensitivity: List[Dict[str, object]] = field(default_factory=list)
+    merged_surfaces: List[Dict[str, object]] = field(default_factory=list)
+    promoted_singletons: List[Patch] = field(default_factory=list)
+    panel_advice: List[Dict[str, object]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     version: str = __version__
 
@@ -108,8 +129,17 @@ def build_residue_table(
     column_scores: Sequence[ColumnScore],
     structure: StructureModel,
     config: RunConfig,
+    topology: Optional[Topology] = None,
+    domains: Optional[Sequence[Segment]] = None,
 ) -> List[ResidueAnalysis]:
-    """Fuse sequence scores with structural values into one row per residue."""
+    """Fuse sequence scores with structural values into one row per residue.
+
+    Residues an antibody cannot reach are hard-excluded here: their scores are
+    zeroed, not merely down-weighted, so they cannot surface anywhere downstream
+    as evidence.
+    """
+    topology = topology or Topology()
+    domains = list(domains or [])
     by_key = structure.by_key()
     rows: List[ResidueAnalysis] = []
     for position, score in zip(residue_map.positions(), column_scores):
@@ -131,13 +161,35 @@ def build_residue_table(
             in_ectodomain=position.in_ectodomain,
             notes=list(score.notes),
         )
+        sequence_position = position.ref_index + 1
+        row.topology = topology.kind_at(sequence_position)
+        domain = domain_at(domains, sequence_position)
+        row.domain = domain.description if domain else ""
+        row.accessible = position.in_ectodomain and topology.is_accessible(
+            sequence_position
+        )
         if record is not None:
             row.sasa = record.sasa
-            row.rsa = record.rsa
+            row.rsa = record.rsa_raw if config.keep_disordered else record.rsa
             row.plddt = record.plddt
             row.secondary_structure = record.secondary_structure
             row.centroid = record.centroid
+            row.in_disordered_region = record.in_disordered_region
         row.buried = not (row.rsa == row.rsa and row.rsa >= config.rsa_cutoff)
+
+        if not row.accessible:
+            # an antibody cannot reach it, so it is not a candidate at any score
+            row.discrimination = 0.0
+            row.max_grantham = 0.0
+            row.mask_reasons.append(
+                "outside_ectodomain"
+                if not row.in_ectodomain and topology.is_accessible(sequence_position)
+                else "outside_topology"
+            )
+            if row.topology not in ("unknown", "extracellular"):
+                row.notes.append(
+                    f"{row.topology.replace('_', ' ')} - not reachable by an antibody"
+                )
 
         composite, exposure, confidence = composite_score(
             row.discrimination, row.rsa, row.plddt
@@ -146,14 +198,14 @@ def build_residue_table(
         row.confidence_weight = confidence
         row.composite = composite
 
-        if not row.in_ectodomain:
-            row.mask_reasons.append("outside_ectodomain")
         if not row.modelled:
             row.mask_reasons.append("not_modelled_in_structure")
         elif row.buried:
             row.mask_reasons.append("buried")
         if record is not None and record.buried_by_context:
             row.mask_reasons.append("assembly_interface")
+        if row.in_disordered_region and not config.keep_disordered:
+            row.mask_reasons.append("disordered_region")
         rows.append(row)
     return rows
 
@@ -207,6 +259,39 @@ def _apply_occluding_chains(
     return []
 
 
+def resolve_topology(
+    config: RunConfig, dataset: Dataset, reference: str
+) -> Tuple[Topology, List[Segment]]:
+    """Work out which part of the chain faces the outside, or ask the user.
+
+    Explicit ``--topology`` wins; otherwise the reference's UniProt features are
+    used when it was fetched by accession; otherwise an ``--ectodomain`` range
+    stands in for the extracellular segment. When none of those is available the
+    caller must stop, because defaulting to the whole chain ranks the inside of
+    the cell.
+    """
+    domains: List[Segment] = []
+    reference_record = dataset.get(reference)
+
+    if reference_record.features:
+        derived, domains = parse_uniprot_features(reference_record.features)
+    else:
+        derived = Topology()
+
+    if config.topology:
+        topology = parse_topology_spec(config.topology, length=len(reference_record.sequence))
+    elif derived.known:
+        topology = derived
+    elif config.ectodomain and config.ectodomain_numbering == "sequence":
+        topology = topology_from_range(*config.ectodomain)
+    else:
+        topology = derived  # unknown; --ectodomain in structure numbering may still cover us
+
+    if config.domains:
+        domains = load_domains_tsv(Path(config.domains))
+    return topology, domains
+
+
 def run_pipeline(config: RunConfig) -> RunResult:
     """Run every stage and return the assembled result (no files written)."""
     dataset, reference = _load_inputs(config)
@@ -221,6 +306,12 @@ def run_pipeline(config: RunConfig) -> RunResult:
     # the degeneracy check needs the aligned sequences to build its tree
     setattr(dataset, "_alignment_sequences", alignment.sequences)
 
+    topology, domain_segments = resolve_topology(config, dataset, reference)
+    if not (topology.known or topology.whole_chain or config.ectodomain):
+        require_topology(
+            None, len(dataset.get(reference).sequence), reference
+        )
+
     structure = load_structure(
         config.structure,
         chain_id=config.chain,
@@ -228,6 +319,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
         context_chains=config.context_chains,
         cache_dir=config.cache_dir,
         run_dssp=config.run_dssp,
+        prefer_assembly=config.prefer_assembly,
     )
     residue_map = ResidueMap.build(
         alignment,
@@ -238,16 +330,29 @@ def run_pipeline(config: RunConfig) -> RunResult:
     )
 
     column_scores = score_alignment(residue_map, dataset)
-    rows = build_residue_table(residue_map, column_scores, structure, config)
+    rows = build_residue_table(
+        residue_map, column_scores, structure, config, topology, domain_segments
+    )
+    accessible = {row.ref_index for row in rows if row.accessible}
 
     glycans = analyse_glycosylation(
-        residue_map, dataset, structure, radius=config.glycan_radius
+        residue_map,
+        dataset,
+        structure,
+        radius=config.glycan_radius,
+        is_accessible=lambda ref_index: ref_index in accessible,
+        topology_kind=lambda ref_index: topology.kind_at(ref_index + 1),
+        near_boundary=lambda ref_index: topology.near_boundary(ref_index + 1),
     )
     _apply_glycan_flags(rows, glycans)
     occlusion_warnings = _apply_occluding_chains(rows, residue_map, config)
 
+    # calibrate on the residues an antibody could actually reach: including the
+    # cytoplasm in the background rate flatters the observed signal
     degeneracy = assess_degeneracy(
-        column_scores, dataset, cutoff=config.discrimination_cutoff
+        [s for s in column_scores if s.ref_index in accessible] or column_scores,
+        dataset,
+        cutoff=config.discrimination_cutoff,
     )
     patches, singletons = find_patches(
         rows,
@@ -260,8 +365,29 @@ def run_pipeline(config: RunConfig) -> RunResult:
     mutants = suggest_mutants(patches, dataset, residue_map, top_n=config.top_n)
     counts = baseline_counts(rows, config.discrimination_cutoff)
 
+    if topology.known and not topology.whole_chain:
+        excluded = sum(1 for row in rows if not row.accessible)
+        warnings_topology = [
+            f"topology ({topology.source}): {topology.summary()}. {excluded} "
+            "residue(s) are not reachable by an antibody and were excluded from "
+            "scoring entirely"
+        ] + list(topology.warnings)
+    elif topology.whole_chain:
+        warnings_topology = [
+            "the whole chain was declared accessible (--topology whole-chain); "
+            "no membrane topology was applied"
+        ]
+    else:
+        warnings_topology = [
+            "no membrane topology was available, so only the supplied "
+            "--ectodomain range restricts the analysis; if this is a membrane "
+            "protein, check that the range excludes the transmembrane helix and "
+            "the cytoplasmic tail"
+        ]
+
     warnings_ = (
-        list(dataset.warnings)
+        warnings_topology
+        + list(dataset.warnings)
         + list(alignment.warnings)
         + list(residue_map.warnings)
         + list(structure.warnings)
@@ -290,5 +416,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
         chimeras=chimeras,
         mutants=mutants,
         counts=counts,
+        topology=topology,
+        domain_segments=domain_segments,
         warnings=warnings_,
     )

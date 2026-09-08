@@ -141,12 +141,13 @@ def _free_end_gaps(aligner) -> None:
 
 def _pairwise_to_reference(
     records: Sequence[SpeciesRecord], reference: str
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], Dict[str, int]]:
     """Fallback: pairwise-align everything to the reference, keep ref columns.
 
     Insertions relative to the reference are dropped, so the resulting 'MSA' has
-    exactly one column per reference residue. This is a real degradation and the
-    caller warns loudly about it.
+    exactly one column per reference residue. This is a real degradation; the
+    number of residues discarded per species is returned so the caller can say
+    how much was lost rather than only that the method was crude.
     """
     from Bio import Align
 
@@ -165,16 +166,26 @@ def _pairwise_to_reference(
 
     ref_seq = next(r.sequence for r in records if r.name == reference)
     aligned = {reference: ref_seq}
+    dropped: Dict[str, int] = {}
     for record in records:
         if record.name == reference:
             continue
         alignment = aligner.align(ref_seq, record.sequence)[0]
         projected = [GAP] * len(ref_seq)
+        kept = 0
         for (ref_start, ref_end), (qry_start, qry_end) in zip(*alignment.aligned):
             for offset in range(ref_end - ref_start):
                 projected[ref_start + offset] = record.sequence[qry_start + offset]
+                kept += 1
         aligned[record.name] = "".join(projected)
-    return aligned
+        dropped[record.name] = len(record.sequence) - kept
+    return aligned, dropped
+
+
+def _is_subsequence(small: str, big: str) -> bool:
+    """Is every residue of ``small`` present in ``big``, in order?"""
+    iterator = iter(big)
+    return all(character in iterator for character in small)
 
 
 def percent_identity(a: str, b: str) -> float:
@@ -203,16 +214,23 @@ def align_sequences(
     if aligned is None and method in ("auto", "muscle"):
         aligned = _run_muscle(records)
         used = "muscle" if aligned else ""
+    dropped: Dict[str, int] = {}
     if aligned is None:
         if method not in ("auto", "pairwise"):
             raise AlignmentError(f"requested aligner {method!r} is not available on PATH")
-        aligned = _pairwise_to_reference(records, reference)
+        aligned, dropped = _pairwise_to_reference(records, reference)
         used = "biopython-pairwise-to-reference"
+        lost = {name: count for name, count in dropped.items() if count}
         warnings_.append(
             "NO TRUE MSA: neither MAFFT nor MUSCLE was found on PATH, so each "
             "sequence was pairwise-aligned to the reference and insertions "
-            "relative to the reference were discarded. Install MAFFT before "
-            "trusting any indel-driven result."
+            "relative to the reference were discarded"
+            + (
+                f" ({', '.join(f'{n}: {c} residue(s)' for n, c in lost.items())})"
+                if lost
+                else ""
+            )
+            + ". Install MAFFT before trusting any indel-driven result."
         )
 
     missing = {r.name for r in records} - set(aligned)
@@ -224,14 +242,20 @@ def align_sequences(
     if len(lengths) != 1:
         raise AlignmentError(f"aligned sequences have unequal lengths: {sorted(lengths)}")
 
-    # the aligner may upper/lower-case or reorder; verify nothing was mangled
+    # the aligner may upper/lower-case or reorder; verify nothing was mangled.
+    # the pairwise fallback drops insertions by construction, so there the
+    # requirement is that what remains is still in order and unaltered.
     for record in records:
         ungapped = aligned[record.name].replace(GAP, "").replace(".", "")
-        if ungapped != record.sequence.upper():
-            raise AlignmentError(
-                f"aligned sequence for {record.name!r} does not match the input "
-                "sequence once gaps are removed"
-            )
+        original = record.sequence.upper()
+        if ungapped == original:
+            continue
+        if dropped and _is_subsequence(ungapped, original):
+            continue
+        raise AlignmentError(
+            f"aligned sequence for {record.name!r} does not match the input "
+            "sequence once gaps are removed"
+        )
 
     ref_aligned = aligned[reference]
     identities = {

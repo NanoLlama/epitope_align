@@ -73,6 +73,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="whether --ectodomain refers to structure author numbering or to "
         "1-based reference sequence positions",
     )
+    parser.add_argument(
+        "--topology",
+        help="membrane topology of the reference, e.g. "
+        "'extracellular=121-763,tm=68-88,cytoplasmic=1-67'. Use 'whole-chain' to "
+        "declare that the entire chain is accessible (a soluble protein, or an "
+        "ectodomain-only construct). Read automatically from UniProt TOPO_DOM / "
+        "TRANSMEM features when sequences are fetched by accession; without it "
+        "and without --ectodomain the run stops rather than scoring the inside "
+        "of the cell",
+    )
+    parser.add_argument(
+        "--domains",
+        help="TSV of 'name<TAB>start<TAB>end' in reference sequence numbering, "
+        "overriding the domains read from UniProt",
+    )
+    parser.add_argument(
+        "--keep-disordered",
+        action="store_true",
+        help="allow residues inside long low-pLDDT regions to seed patches "
+        "(off by default: their RSA is not meaningful)",
+    )
+    parser.add_argument(
+        "--radius-sweep",
+        default="",
+        help="comma-separated patch radii to re-cluster at, e.g. '10,12,14,16,18'; "
+        "writes radius_sensitivity.tsv showing which patches merge when",
+    )
+    parser.add_argument(
+        "--no-assembly",
+        action="store_true",
+        help="use the asymmetric unit rather than biological assembly 1 for PDB IDs",
+    )
     parser.add_argument("--chain", help="chain ID (default: first protein chain)")
     parser.add_argument(
         "--assembly-context",
@@ -153,6 +185,7 @@ def demo_config(outdir: Path) -> RunConfig:
         binding=str(inputs["binding"]),
         reference="mouse",
         structure=str(inputs["structure"]),
+        topology="whole-chain",
         outdir=Path(outdir) / "results",
     )
 
@@ -193,6 +226,11 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         binding=str(values["binding"]),
         reference=str(values["reference"]),
         structure=str(values["structure"]),
+        topology=str(values["topology"]) if values.get("topology") else None,
+        domains=str(values["domains"]) if values.get("domains") else None,
+        keep_disordered=bool(values.get("keep_disordered", False)),
+        radius_sweep=[float(r) for r in _split_list(values.get("radius_sweep"))],
+        prefer_assembly=not bool(values.get("no_assembly", False)),
         outdir=Path(values.get("outdir", "results")),
         ectodomain=ectodomain,
         ectodomain_numbering=str(values.get("ectodomain_numbering", "structure")),

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Callable, Dict, List, Optional, Sequence, Set
 
 from .align import GAP, ResidueMap
 from .io_seq import Dataset
 from .structure import StructureModel, distance
+from .topology import BOUNDARY_MARGIN
 
 #: A glycan reaches well beyond its attachment point; residues within this
 #: radius of a differential sequon asparagine are flagged as possibly occluded.
@@ -25,6 +26,8 @@ class Sequon:
     motif: str
     present_in: List[str] = field(default_factory=list)
     absent_in: List[str] = field(default_factory=list)
+    topology: str = "unknown"
+    boundary_proximal: bool = False
 
     @property
     def differential(self) -> bool:
@@ -38,6 +41,7 @@ class GlycanAnalysis:
     occluded: Dict[int, List[str]] = field(default_factory=dict)
     radius: float = DEFAULT_GLYCAN_RADIUS
     unplaced: List[Sequon] = field(default_factory=list)
+    rejected_on_topology: List[Sequon] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -71,8 +75,18 @@ def analyse_glycosylation(
     dataset: Dataset,
     structure: StructureModel,
     radius: float = DEFAULT_GLYCAN_RADIUS,
+    is_accessible: Optional[Callable[[int], bool]] = None,
+    topology_kind: Optional[Callable[[int], str]] = None,
+    near_boundary: Optional[Callable[[int], bool]] = None,
 ) -> GlycanAnalysis:
-    """Find species-specific sequons and flag residues a glycan could occlude."""
+    """Find species-specific sequons and flag residues a glycan could occlude.
+
+    N-linked glycosylation happens in the ER lumen, so a sequon on the
+    cytoplasmic side of the membrane is never occupied however good it looks in
+    sequence. Those are rejected here explicitly - not left to fall out of the
+    patch-seeding mask - and counted, so a silent drop from three sequons to one
+    is visible in the report.
+    """
     analysis = GlycanAnalysis(radius=radius)
     alignment = residue_map.alignment
 
@@ -103,6 +117,16 @@ def analyse_glycosylation(
             present_in=present,
             absent_in=absent,
         )
+        if ref_index is not None:
+            if topology_kind is not None:
+                sequon.topology = topology_kind(ref_index)
+            if near_boundary is not None and near_boundary(ref_index):
+                sequon.boundary_proximal = True
+
+        # a sequon that never faces the ER lumen is not a sequon in practice
+        if ref_index is not None and is_accessible is not None and not is_accessible(ref_index):
+            analysis.rejected_on_topology.append(sequon)
+            continue
         analysis.sequons.append(sequon)
 
         binder_present = set(present) & binders
@@ -128,6 +152,24 @@ def analyse_glycosylation(
                 )
                 analysis.occluded.setdefault(ref_index, []).append(label)
 
+    if analysis.rejected_on_topology:
+        described = ", ".join(
+            f"{s.ref_number or f'column {s.column + 1}'} ({s.topology})"
+            for s in analysis.rejected_on_topology[:8]
+        )
+        analysis.warnings.append(
+            f"{len(analysis.rejected_on_topology)} sequon(s) rejected because they "
+            f"are not extracellular and so are never glycosylated: {described}"
+            + (" ..." if len(analysis.rejected_on_topology) > 8 else "")
+        )
+    boundary = [s for s in analysis.differential if s.boundary_proximal]
+    if boundary:
+        analysis.warnings.append(
+            f"{len(boundary)} differential sequon(s) sit within "
+            f"{BOUNDARY_MARGIN} residues of the extracellular boundary, where "
+            "glycan occupancy is unreliable: "
+            + ", ".join(s.ref_number or "?" for s in boundary)
+        )
     if analysis.differential:
         analysis.warnings.append(
             f"{len(analysis.differential)} differential N-glycosylation sequon(s) "

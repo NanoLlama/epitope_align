@@ -37,6 +37,16 @@ INSERTION_AFTER_INDEX = 75
 # residues absent from the ATOM records, to exercise SEQRES-vs-ATOM gaps
 UNMODELLED_INDICES = [60, 61, 62]
 
+#: Optional "stalk": a long, highly divergent, low-pLDDT stretch. AlphaFold
+#: models such regions as extended tethers, which inflates their RSA so every
+#: residue passes the exposure filter, and they are the least constrained part
+#: of a protein so they look discriminating too. Together that floods the
+#: candidate list with a modelling artifact - the failure the disordered-region
+#: filter exists to catch.
+STALK_INDICES = list(range(55, 85))
+STALK_PLDDT = 30.0
+ORDERED_PLDDT = 88.0
+
 
 def _fcc_ball(n: int, spacing: float) -> List[Tuple[float, float, float]]:
     """The ``n`` innermost points of a face-centred-cubic lattice.
@@ -144,6 +154,7 @@ def reference_sequence(seed: int = 7) -> str:
 
 def species_sequences(
     include_informative: bool = False,
+    disordered_stalk: bool = False,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """Return ``(sequences, binding_calls)`` for the synthetic panel.
 
@@ -189,6 +200,16 @@ def species_sequences(
     macaque = macaque[:110] + macaque[113:]
     seqs["macaque"] = "".join(macaque)
 
+    if disordered_stalk:
+        # the stalk diverges hard between the two clades, as a real one does
+        stalk_rng = random.Random(23)
+        for name in ("human", "marmoset", "macaque"):
+            sequence = list(seqs[name])
+            for index in STALK_INDICES:
+                if index < len(sequence):
+                    sequence[index] = _swap(sequence[index], stalk_rng)
+            seqs[name] = "".join(sequence)
+
     if include_informative:
         vole = list(mouse)
         for index, aa in drastic.items():
@@ -218,8 +239,15 @@ def _swap(aa: str, rng: random.Random, conservative: bool = False) -> str:
     return rng.choice(AA.replace(aa, ""))
 
 
-def write_pdb(path: Path, sequence: str | None = None) -> Path:
-    """Write the toy structure for the reference sequence."""
+def write_pdb(
+    path: Path, sequence: str | None = None, disordered_stalk: bool = False
+) -> Path:
+    """Write the toy structure for the reference sequence.
+
+    With ``disordered_stalk`` the B-factor column carries pLDDT values - high
+    everywhere except the stalk - and the file is named so it is recognised as
+    an AlphaFold model.
+    """
     sequence = sequence or reference_sequence()
     coords = coordinates()
     numbers = author_numbers()
@@ -256,11 +284,16 @@ def write_pdb(path: Path, sequence: str | None = None) -> Path:
                         ),
                     )
                 )
+        bfactor = (
+            STALK_PLDDT
+            if disordered_stalk and index in STALK_INDICES
+            else ORDERED_PLDDT
+        )
         for name, (ax, ay, az) in atoms:
             element = name[0]
             lines.append(
                 f"ATOM  {serial:5d}  {name:<3s}{THREE[aa]:>4s} A{resseq:4d}{icode}"
-                f"   {ax:8.3f}{ay:8.3f}{az:8.3f}  1.00 85.00          {element:>2s}"
+                f"   {ax:8.3f}{ay:8.3f}{az:8.3f}  1.00{bfactor:6.2f}          {element:>2s}"
             )
             serial += 1
     lines.append("END")
@@ -273,11 +306,17 @@ def _unit(v: Sequence[float]) -> Tuple[float, float, float]:
     return (v[0] / length, v[1] / length, v[2] / length)
 
 
-def write_inputs(directory: Path, include_informative: bool = False) -> Dict[str, Path]:
+def write_inputs(
+    directory: Path,
+    include_informative: bool = False,
+    disordered_stalk: bool = False,
+) -> Dict[str, Path]:
     """Write fasta, binding CSV and PDB into ``directory``."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    seqs, calls = species_sequences(include_informative=include_informative)
+    seqs, calls = species_sequences(
+        include_informative=include_informative, disordered_stalk=disordered_stalk
+    )
     fasta = directory / "species.fasta"
     with open(fasta, "w") as handle:
         for name, seq in seqs.items():
@@ -288,7 +327,10 @@ def write_inputs(directory: Path, include_informative: bool = False) -> Dict[str
     binding.write_text(
         "species,binding\n" + "".join(f"{k},{v}\n" for k, v in calls.items())
     )
-    pdb = write_pdb(directory / "reference.pdb")
+    name = "AF-DEMO-F1.pdb" if disordered_stalk else "reference.pdb"
+    pdb = write_pdb(
+        directory / name, sequence=seqs["mouse"], disordered_stalk=disordered_stalk
+    )
     return {"sequences": fasta, "binding": binding, "structure": pdb}
 
 

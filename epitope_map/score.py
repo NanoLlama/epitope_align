@@ -499,6 +499,15 @@ class ResidueAnalysis:
     confidence_weight: float = 1.0
     composite: float = 0.0
 
+    # topology and annotation
+    topology: str = "unknown"
+    domain: str = ""
+    accessible: bool = True
+    in_disordered_region: bool = False
+    alignment_confidence: float = float("nan")
+    local_identity: float = float("nan")
+    low_identity_window: bool = False
+
     # flags
     buried: bool = False
     in_ectodomain: bool = True
@@ -516,9 +525,29 @@ class ResidueAnalysis:
         """May this residue seed a patch?"""
         return (
             not self.masked
+            and self.accessible
             and self.modelled
             and self.centroid is not None
             and self.discrimination >= discrimination_cutoff
+        )
+
+    def surface_context(self, rsa_cutoff: float) -> bool:
+        """Exposed and reachable, but not itself discriminating.
+
+        A real epitope contains conserved residues; these are carried alongside a
+        patch so its extent and area are not understated, without contributing to
+        its score.
+        """
+        return (
+            self.accessible
+            and self.modelled
+            and self.centroid is not None
+            and not self.in_disordered_region
+            and self.rsa == self.rsa
+            and self.rsa >= rsa_cutoff
+            and not any(
+                reason not in ("buried",) for reason in self.mask_reasons
+            )
         )
 
     @property

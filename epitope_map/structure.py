@@ -34,6 +34,14 @@ _THREE_TO_ONE = {
 _BACKBONE = {"N", "CA", "C", "O", "OXT"}
 
 _RCSB_URL = "https://files.rcsb.org/download/{pdb_id}.cif"
+_RCSB_ASSEMBLY_URL = "https://files.rcsb.org/download/{pdb_id}-assembly1.cif"
+
+#: A contiguous run at least this long, averaging below
+#: :data:`DISORDER_PLDDT`, is a modelling failure rather than a surface: its
+#: coordinates are an extended tether and the RSA computed from them is
+#: meaningless.
+DISORDER_MIN_LENGTH = 10
+DISORDER_PLDDT = 50.0
 _AFDB_URL = "https://alphafold.ebi.ac.uk/files/{accession}-model_v4.cif"
 
 
@@ -75,6 +83,10 @@ class ResidueRecord:
     ca: Optional[Tuple[float, float, float]] = None
     secondary_structure: str = "-"
     has_altloc: bool = False
+    in_disordered_region: bool = False
+    #: RSA as computed, kept even where :attr:`rsa` is voided for disorder, so
+    #: --keep-disordered has something to restore.
+    rsa_raw: float = float("nan")
 
     @property
     def buried_by_context(self) -> bool:
@@ -97,6 +109,10 @@ class StructureModel:
     context_chains: List[str] = field(default_factory=list)
     dssp_used: bool = False
     sasa_backend: str = "shrake_rupley"
+    assembly: str = "asymmetric unit"
+    disordered_regions: List[Tuple[ResidueKey, ResidueKey, float, int]] = field(
+        default_factory=list
+    )
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -125,8 +141,15 @@ def _download(url: str, dest: Path) -> Path:
     return dest
 
 
-def resolve_structure(spec: str, cache_dir: Optional[Path] = None) -> Path:
-    """Resolve a path, a 4-character PDB ID, or an AlphaFold DB accession."""
+def resolve_structure(
+    spec: str, cache_dir: Optional[Path] = None, prefer_assembly: bool = True
+) -> Path:
+    """Resolve a path, a 4-character PDB ID, or an AlphaFold DB accession.
+
+    For a PDB ID the biological assembly is preferred over the asymmetric unit,
+    since the asymmetric unit of an obligate oligomer leaves interface residues
+    looking solvent-exposed.
+    """
     path = Path(spec)
     if path.exists():
         return path
@@ -141,6 +164,18 @@ def resolve_structure(spec: str, cache_dir: Optional[Path] = None) -> Path:
             _download(_AFDB_URL.format(accession=accession), dest)
         return dest
     if len(token) == 4 and token[0].isdigit():
+        # the biological assembly, not the asymmetric unit: an obligate dimer
+        # analysed as a monomer reports interface residues as exposed
+        if prefer_assembly:
+            dest = cache_dir / f"{token.lower()}-assembly1.cif"
+            if dest.exists():
+                return dest
+            try:
+                return _download(
+                    _RCSB_ASSEMBLY_URL.format(pdb_id=token.lower()), dest
+                )
+            except StructureError:
+                pass
         dest = cache_dir / f"{token.lower()}.cif"
         if not dest.exists():
             _download(_RCSB_URL.format(pdb_id=token.lower()), dest)
@@ -369,6 +404,7 @@ def load_structure(
     context_chains: Optional[Sequence[str]] = None,
     cache_dir: Optional[Path] = None,
     run_dssp: bool = True,
+    prefer_assembly: bool = True,
 ) -> StructureModel:
     """Parse a structure and compute SASA, RSA, pLDDT, geometry and DSSP.
 
@@ -376,7 +412,7 @@ def load_structure(
     second structure) to a second SASA pass, so oligomer interfaces can be
     detected as residues that lose accessibility in context.
     """
-    path = resolve_structure(spec, cache_dir=cache_dir)
+    path = resolve_structure(spec, cache_dir=cache_dir, prefer_assembly=prefer_assembly)
     structure, text_path = _open_structure(path)
     model = next(iter(structure))
     had_altloc = _clean_altlocs(structure)
@@ -396,6 +432,14 @@ def load_structure(
 
     is_af = _is_alphafold(path, structure)
     result = StructureModel(path=path, chain_id=chain_id, is_alphafold=is_af)
+    if "assembly" in path.name:
+        result.assembly = "biological assembly 1"
+        if len([c for c in model]) > 1:
+            result.warnings.append(
+                f"using {result.assembly}: chains "
+                f"{[c.get_id() for c in model]} are present, so pass "
+                "--context-chains to have their interfaces masked"
+            )
     if had_altloc:
         result.warnings.append(
             "structure contains altloc records; the highest-occupancy conformer "
@@ -473,7 +517,7 @@ def load_structure(
             bfactor_mean=sum(bfactors) / len(bfactors) if bfactors else float("nan"),
             has_altloc=any(a.is_disordered() for a in residue),
         )
-        record.rsa = relative_sasa(aa, record.sasa)
+        record.rsa = record.rsa_raw = relative_sasa(aa, record.sasa)
         if is_af:
             record.plddt = record.bfactor_mean
         result.residues.append(record)
@@ -505,6 +549,8 @@ def load_structure(
     else:
         _fallback_secondary_structure(result.residues)
 
+    _flag_disordered_regions(result)
+
     missing = _detect_internal_gaps(result.residues)
     if missing:
         result.warnings.append(
@@ -513,6 +559,55 @@ def load_structure(
             + (" ..." if len(missing) > 8 else "")
         )
     return result
+
+
+def _flag_disordered_regions(
+    model: StructureModel,
+    min_length: int = DISORDER_MIN_LENGTH,
+    cutoff: float = DISORDER_PLDDT,
+) -> None:
+    """Mark contiguous low-pLDDT runs, and void the RSA computed inside them.
+
+    A single low-pLDDT residue in an otherwise ordered loop is worth keeping -
+    flexible loops are where epitopes sit. A thirty-residue stretch averaging
+    pLDDT 35 is different in kind: AlphaFold has modelled it as an extended
+    tether, every residue in it looks fully exposed, and the whole region floods
+    the candidate list. Those residues keep their sequence scores but lose their
+    (meaningless) RSA.
+    """
+    if not model.is_alphafold:
+        return
+    residues = model.residues
+    low = [r.plddt == r.plddt and r.plddt < cutoff for r in residues]
+
+    start = None
+    for index in range(len(residues) + 1):
+        inside = index < len(residues) and low[index]
+        if inside and start is None:
+            start = index
+        elif not inside and start is not None:
+            run = residues[start:index]
+            values = [r.plddt for r in run if r.plddt == r.plddt]
+            if len(run) >= min_length and values and sum(values) / len(values) < cutoff:
+                for residue in run:
+                    residue.in_disordered_region = True
+                    residue.rsa = float("nan")  # not a surface, so not an RSA
+                model.disordered_regions.append(
+                    (run[0].key, run[-1].key, sum(values) / len(values), len(run))
+                )
+            start = None
+
+    if model.disordered_regions:
+        described = ", ".join(
+            f"{a.label}-{b.label} ({n} residues, mean pLDDT {mean:.0f})"
+            for a, b, mean, n in model.disordered_regions
+        )
+        model.warnings.append(
+            f"{len(model.disordered_regions)} disordered region(s) in the model: "
+            f"{described}. AlphaFold models these as extended tethers, so their "
+            "RSA is meaningless and has been voided; they are excluded from patch "
+            "seeding unless --keep-disordered is given"
+        )
 
 
 def _detect_internal_gaps(residues: List[ResidueRecord]) -> List[str]:
