@@ -1,11 +1,16 @@
 """Clustering, patch metrics and ranking."""
 
+import math
+
 import pytest
 
 from epitope_map.patches import (
     MAX_PLAUSIBLE_SPREAD,
     baseline_counts,
     find_patches,
+    merged_surfaces,
+    promote_singletons,
+    radius_sweep,
 )
 from epitope_map.score import ResidueAnalysis
 
@@ -128,3 +133,89 @@ def test_baseline_counts_track_each_narrowing_step():
     assert counts["discriminating"] == 3
     assert counts["discriminating_and_exposed"] == 2
     assert counts["after_context_masking"] == 2
+
+
+def test_min_distance_beats_centroid_separation_for_elongated_patches():
+    """Two long patches can be far apart by centroid and touching in fact."""
+    left = [residue(i, (i * 4.0, 0.0, 0.0)) for i in range(6)]     # 0..20 on x
+    right = [residue(20 + i, (26.0 + i * 4.0, 0.0, 0.0)) for i in range(6)]
+    patches, _ = find_patches(left + right, discrimination_cutoff=0.25, radius=5.0)
+    assert len(patches) == 2
+    a, b = patches
+    centroid_gap = math.dist(a.centroid, b.centroid)
+    assert a.min_distance_to(b) == pytest.approx(6.0)
+    assert centroid_gap > 3 * a.min_distance_to(b)
+    assert any(pid == b.patch_id for pid, _ in a.neighbours)
+
+
+def test_groups_20A_apart_separate_at_12A_and_merge_at_18A():
+    """Regression test 3 from the change request."""
+    left = [residue(i, (i * 4.0, 0.0, 0.0)) for i in range(4)]        # x = 0..12
+    right = [residue(20 + i, (32.0 + i * 4.0, 0.0, 0.0)) for i in range(4)]  # gap 20
+    residues = left + right
+
+    at12, _ = find_patches(residues, discrimination_cutoff=0.25, radius=12.0)
+    assert len(at12) == 2
+
+    rows = radius_sweep(residues, discrimination_cutoff=0.25, radii=(10, 12, 14, 16, 18, 20))
+    by_radius = {row["radius_A"]: row for row in rows}
+    assert by_radius[12]["n_patches"] == 2
+    assert by_radius[20]["n_patches"] == 1
+    assert by_radius[20]["largest_patch"] == 8
+    # the sweep must not disturb the patch assignment of the real run
+    assert {r.patch_id for r in residues} == {p.patch_id for p in at12} | {None} - {None}
+
+
+def test_merged_surfaces_report_the_combined_area():
+    left = [residue(i, (i * 4.0, 0.0, 0.0), composite=0.5) for i in range(3)]
+    right = [residue(20 + i, (22.0 + i * 4.0, 0.0, 0.0), composite=0.5) for i in range(3)]
+    for r in left + right:
+        r.sasa = 100.0
+    patches, singles = find_patches(left + right, discrimination_cutoff=0.25, radius=12.0)
+    assert len(patches) == 2
+    surfaces = merged_surfaces(patches, singles)
+    assert len(surfaces) == 1
+    surface = surfaces[0]
+    assert surface["n_residues"] == 6
+    assert surface["accessible_area_A2"] == pytest.approx(600.0)
+    assert set(surface["patches"]) == {p.patch_id for p in patches}
+
+
+def test_patches_carry_conserved_surface_context_without_scoring_it():
+    members = [residue(i, (i * 3.0, 0.0, 0.0)) for i in range(3)]
+    conserved = residue(50, (4.0, 3.0, 0.0), discrimination=0.0, composite=0.0)
+    patches, _ = find_patches(
+        members + [conserved], discrimination_cutoff=0.25, radius=12.0
+    )
+    patch = patches[0]
+    assert patch.size == 3                       # score comes from members only
+    assert [r.ref_index for r in patch.context] == [50]
+    assert patch.n_total_surface == 4
+    assert patch.total_score == pytest.approx(sum(m.composite for m in members))
+
+
+def test_isolated_indel_is_promoted_not_buried():
+    """A lone surface insertion outranks a dump of leftovers."""
+    cluster = [residue(i, (i * 3.0, 0.0, 0.0)) for i in range(3)]
+    insertion = residue(40, (100.0, 0.0, 0.0), discrimination=0.9, composite=0.9)
+    insertion.involves_gap = True
+    dull = residue(60, (300.0, 0.0, 0.0), discrimination=0.3, composite=0.3)
+    patches, singletons = find_patches(
+        cluster + [insertion, dull], discrimination_cutoff=0.25, radius=12.0
+    )
+    high, low = promote_singletons(singletons, patches)
+    assert [p.members[0].ref_index for p in high] == [40]
+    assert "indel" in high[0].promoted_reason
+    assert [p.members[0].ref_index for p in low] == [60]
+
+
+def test_singleton_near_a_ranked_patch_is_promoted():
+    cluster = [residue(i, (i * 3.0, 0.0, 0.0)) for i in range(3)]
+    nearby = residue(40, (24.0, 0.0, 0.0), discrimination=0.3, composite=0.3)
+    patches, singletons = find_patches(
+        cluster + [nearby], discrimination_cutoff=0.25, radius=12.0
+    )
+    high, low = promote_singletons(singletons, patches)
+    assert [p.members[0].ref_index for p in high] == [40]
+    assert "plausibly part of" in high[0].promoted_reason
+    assert not low

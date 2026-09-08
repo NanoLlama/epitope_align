@@ -82,7 +82,11 @@ def _parse_aligned_fasta(text: str) -> Dict[str, str]:
     return out
 
 
-def _run_mafft(records: Sequence[SpeciesRecord], threads: int = 1) -> Optional[Dict[str, str]]:
+def _run_mafft(
+    records: Sequence[SpeciesRecord],
+    threads: int = 1,
+    extra_args: Optional[Sequence[str]] = None,
+) -> Optional[Dict[str, str]]:
     if not shutil.which("mafft"):
         return None
     with tempfile.TemporaryDirectory() as tmp:
@@ -90,7 +94,8 @@ def _run_mafft(records: Sequence[SpeciesRecord], threads: int = 1) -> Optional[D
         _write_fasta(records, infile)
         try:
             proc = subprocess.run(
-                ["mafft", "--auto", "--anysymbol", "--thread", str(threads), str(infile)],
+                ["mafft", *(extra_args or ["--auto"]), "--anysymbol",
+                 "--thread", str(threads), str(infile)],
                 capture_output=True,
                 text=True,
                 timeout=1800,
@@ -140,7 +145,11 @@ def _free_end_gaps(aligner) -> None:
 
 
 def _pairwise_to_reference(
-    records: Sequence[SpeciesRecord], reference: str
+    records: Sequence[SpeciesRecord],
+    reference: str,
+    open_gap: float = -11,
+    extend_gap: float = -1,
+    matrix: str = "BLOSUM62",
 ) -> Tuple[Dict[str, str], Dict[str, int]]:
     """Fallback: pairwise-align everything to the reference, keep ref columns.
 
@@ -153,13 +162,13 @@ def _pairwise_to_reference(
 
     aligner = Align.PairwiseAligner()
     aligner.mode = "global"
-    aligner.open_gap_score = -11
-    aligner.extend_gap_score = -1
+    aligner.open_gap_score = open_gap
+    aligner.extend_gap_score = extend_gap
     _free_end_gaps(aligner)
     try:
         from Bio.Align import substitution_matrices
 
-        aligner.substitution_matrix = substitution_matrices.load("BLOSUM62")
+        aligner.substitution_matrix = substitution_matrices.load(matrix)
     except Exception:  # pragma: no cover - defensive
         aligner.match_score = 2
         aligner.mismatch_score = -1
@@ -538,4 +547,167 @@ def _insertion_columns(alignment: Alignment) -> Dict[int, List[int]]:
             ref_index += 1
         else:
             out.setdefault(ref_index, []).append(column)
+    return out
+
+
+# --------------------------------------------------------------------------
+# alignment reliability
+# --------------------------------------------------------------------------
+
+#: Columns below this agreement rate are not trustworthy enough to name specific
+#: residue equivalences from, which is what a point mutant is.
+CONFIDENCE_CUTOFF = 0.7
+
+#: Half-width of the window used for local identity.
+IDENTITY_WINDOW = 20
+
+#: A window this far (in percentage points) below the chain average is a region
+#: where the aligner is guessing.
+LOW_IDENTITY_MARGIN = 15.0
+
+
+def _alternative_alignments(
+    records: Sequence[SpeciesRecord], reference: str, threads: int = 1
+) -> List[Dict[str, str]]:
+    """Re-align the same sequences a few different ways.
+
+    Where MAFFT and MUSCLE are installed, their genuinely different algorithms
+    are used (local and global pair refinement). Where they are not, the
+    pairwise fallback is re-run with different gap penalties and substitution
+    matrices, which is weaker but still exposes the columns whose equivalences
+    depend on the scoring choice rather than on the sequences.
+    """
+    variants: List[Dict[str, str]] = []
+
+    for extra in (["--localpair", "--maxiterate", "100"], ["--globalpair", "--maxiterate", "100"]):
+        aligned = _run_mafft(records, threads=threads, extra_args=extra)
+        if aligned:
+            variants.append(aligned)
+    muscle = _run_muscle(records)
+    if muscle:
+        variants.append(muscle)
+
+    if len(variants) < 2:
+        # a deliberately wide spread: where the sequences are unambiguous every
+        # setting recovers the same equivalences, and where they are not, the
+        # spread is what exposes it
+        for open_gap, extend_gap, matrix in (
+            (-11, -1, "BLOSUM62"),
+            (-4, -0.2, "BLOSUM62"),
+            (-20, -3, "BLOSUM62"),
+            (-11, -1, "BLOSUM45"),
+            (-6, -0.5, "BLOSUM80"),
+        ):
+            aligned, _ = _pairwise_to_reference(
+                records, reference, open_gap=open_gap, extend_gap=extend_gap, matrix=matrix
+            )
+            variants.append(aligned)
+    return variants
+
+
+def _equivalences(aligned: Dict[str, str], reference: str) -> Dict[Tuple[str, int], int]:
+    """Map (species, reference residue index) -> that species' residue index.
+
+    This is the thing a point mutant actually rests on: which residue of the
+    non-binder corresponds to a given residue of the reference.
+    """
+    ref_aligned = aligned[reference]
+    positions: Dict[str, List[int]] = {}
+    for name, sequence in aligned.items():
+        index = -1
+        mapped = []
+        for character in sequence:
+            if character != GAP:
+                index += 1
+            mapped.append(index if character != GAP else -1)
+        positions[name] = mapped
+
+    out: Dict[Tuple[str, int], int] = {}
+    ref_index = -1
+    for column, character in enumerate(ref_aligned):
+        if character == GAP:
+            continue
+        ref_index += 1
+        for name in aligned:
+            if name == reference:
+                continue
+            out[(name, ref_index)] = positions[name][column]
+    return out
+
+
+def alignment_confidence(
+    alignment: Alignment,
+    records: Sequence[SpeciesRecord],
+    threads: int = 1,
+) -> Tuple[Dict[int, float], List[str]]:
+    """Per-reference-residue agreement across independently built alignments.
+
+    1.0 means every method placed the same residue of every other species
+    opposite this one. Low values mark loops where the region is right but the
+    specific residue pairing is a guess - the case where a chimera is safe and a
+    point mutant is not.
+    """
+    warnings_: List[str] = []
+    try:
+        variants = _alternative_alignments(records, alignment.reference, threads=threads)
+    except Exception as exc:  # pragma: no cover - defensive
+        return {}, [f"alignment confidence could not be computed: {exc}"]
+    if not variants:
+        return {}, ["alignment confidence could not be computed: no alternative alignment"]
+
+    baseline = _equivalences(alignment.sequences, alignment.reference)
+    others = [_equivalences(v, alignment.reference) for v in variants]
+    n_reference = len(alignment.sequences[alignment.reference].replace(GAP, ""))
+    species = [name for name in alignment.sequences if name != alignment.reference]
+
+    confidence: Dict[int, float] = {}
+    for ref_index in range(n_reference):
+        agreements = []
+        for name in species:
+            expected = baseline.get((name, ref_index))
+            for variant in others:
+                agreements.append(1.0 if variant.get((name, ref_index)) == expected else 0.0)
+        confidence[ref_index] = sum(agreements) / len(agreements) if agreements else 1.0
+
+    method_note = (
+        f"alignment confidence from {len(variants)} alternative alignment(s)"
+        if any(shutil.which(tool) for tool in ("mafft", "muscle"))
+        else "alignment confidence from re-scored pairwise alignments only "
+        "(MAFFT/MUSCLE not installed), which understates the uncertainty"
+    )
+    warnings_.append(method_note)
+    return confidence, warnings_
+
+
+def local_identity(
+    alignment: Alignment, window: int = IDENTITY_WINDOW
+) -> Dict[int, float]:
+    """Mean identity to the reference in a +/-``window`` sliding window.
+
+    A loop where identity drops well below the rest of the chain is where the
+    aligner has the least to go on.
+    """
+    reference = alignment.reference
+    ref_aligned = alignment.sequences[reference]
+    columns = [i for i, c in enumerate(ref_aligned) if c != GAP]
+    others = [name for name in alignment.sequences if name != reference]
+
+    per_position: List[float] = []
+    for column in columns:
+        matches = comparisons = 0
+        for name in others:
+            character = alignment.sequences[name][column]
+            if character == GAP:
+                comparisons += 1
+                continue
+            comparisons += 1
+            matches += 1 if character == ref_aligned[column] else 0
+        per_position.append(100.0 * matches / comparisons if comparisons else 0.0)
+
+    out: Dict[int, float] = {}
+    for index in range(len(per_position)):
+        low = max(0, index - window)
+        high = min(len(per_position), index + window + 1)
+        chunk = per_position[low:high]
+        out[index] = sum(chunk) / len(chunk) if chunk else 0.0
     return out

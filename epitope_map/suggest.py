@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .align import GAP, ResidueMap
+from .align import CONFIDENCE_CUTOFF, GAP, ResidueMap
 from .data.grantham import grantham_distance
 from .io_seq import Dataset
 from .patches import Patch
@@ -26,6 +26,11 @@ _MERGE_GAP = 8
 
 #: Residues of flanking sequence included on each side of a segment.
 _FLANK = 2
+
+#: A swap longer than this, or one needing more segments than
+#: :data:`MAX_SEGMENTS`, is not a practical construct.
+MAX_SWAP_LENGTH = 40
+MAX_SEGMENTS = 2
 
 
 @dataclass
@@ -56,6 +61,9 @@ class ChimeraSuggestion:
     other_patches_included: List[str] = field(default_factory=list)
     n_discriminating_included: int = 0
     note: str = ""
+    constructible: bool = True
+    problems: List[str] = field(default_factory=list)
+    domain_swap: str = ""
 
     @property
     def start_ref_index(self) -> int:
@@ -102,6 +110,8 @@ class MutantSuggestion:
     rsa: float
     priority: float
     rationale: str
+    verified: bool = True
+    caveat: str = ""
 
     @property
     def label(self) -> str:
@@ -215,16 +225,101 @@ def suggest_chimeras(
             for r in residues
             if inside(r.ref_index) and r.discrimination > 0 and not r.buried
         )
-        suggestions.append(
-            ChimeraSuggestion(
-                patch_id=patch.patch_id,
-                segments=segments,
-                other_patches_included=included,
-                n_discriminating_included=n_disc,
-                note=note,
-            )
+        suggestion = ChimeraSuggestion(
+            patch_id=patch.patch_id,
+            segments=segments,
+            other_patches_included=included,
+            n_discriminating_included=n_disc,
+            note=note,
         )
+        _check_constructible(suggestion, by_ref_index)
+        _add_domain_swap(suggestion, patch, by_ref_index)
+        suggestions.append(suggestion)
     return suggestions
+
+
+def _check_constructible(
+    suggestion: ChimeraSuggestion, by_ref_index: Dict[int, ResidueAnalysis]
+) -> None:
+    """Would a molecular biologist actually be able to build this?
+
+    A swap that crosses the membrane, or that needs four separate segments
+    stitched together, is a suggestion no one can act on.
+    """
+    problems: List[str] = []
+    crossed = {
+        by_ref_index[i].topology
+        for segment in suggestion.segments
+        for i in range(segment.start_ref_index, segment.end_ref_index + 1)
+        if i in by_ref_index
+    }
+    crossed.discard("unknown")
+    if "transmembrane" in crossed:
+        problems.append("includes transmembrane residues")
+    if "cytoplasmic" in crossed:
+        problems.append("crosses into the cytoplasmic side")
+    if len(crossed - {"extracellular"}) and len(crossed) > 1:
+        problems.append(f"spans more than one topological compartment ({sorted(crossed)})")
+    if suggestion.length > MAX_SWAP_LENGTH:
+        problems.append(
+            f"{suggestion.length} residues is more than the ~{MAX_SWAP_LENGTH} a "
+            "point-localising swap should move"
+        )
+    if len(suggestion.segments) > MAX_SEGMENTS:
+        problems.append(
+            f"{len(suggestion.segments)} separate segments is not a practical "
+            "construct; use the domain-level swap instead"
+        )
+    suggestion.problems = problems
+    suggestion.constructible = not problems
+
+
+def _add_domain_swap(
+    suggestion: ChimeraSuggestion,
+    patch: Patch,
+    by_ref_index: Dict[int, ResidueAnalysis],
+) -> None:
+    """Name a whole-domain swap when the patch sits inside one annotated domain.
+
+    When the top patches fall in different domains, one domain swap distinguishes
+    them in a single experiment - which beats stitching six segments together.
+    """
+    domains = {
+        by_ref_index[m.ref_index].domain
+        for m in patch.members
+        if m.ref_index in by_ref_index and by_ref_index[m.ref_index].domain
+    }
+    if len(domains) == 1:
+        suggestion.domain_swap = domains.pop()
+
+
+def _reliability(member: ResidueAnalysis) -> Tuple[bool, str]:
+    """Should this residue equivalence be trusted enough to order a mutant?
+
+    A point mutant names a specific residue of the non-binder as the counterpart
+    of a specific residue of the reference. In a low-identity, indel-bearing loop
+    that pairing is the aligner's guess: the region can be right and the
+    construct still wrong, which is the expensive way to be wrong.
+    """
+    reasons = []
+    if (
+        member.alignment_confidence == member.alignment_confidence
+        and member.alignment_confidence < CONFIDENCE_CUTOFF
+    ):
+        reasons.append(
+            f"alignment confidence {member.alignment_confidence:.2f}"
+        )
+    if member.low_identity_window:
+        reasons.append(f"local identity {member.local_identity:.0f}%")
+    if member.involves_gap:
+        reasons.append("indel-bearing column")
+    if not reasons:
+        return False, ""
+    return True, (
+        "UNVERIFIED equivalence (" + ", ".join(reasons) + "): the region is "
+        "trustworthy but this specific residue pairing is not - swap the segment "
+        "before ordering this mutant"
+    )
 
 
 def suggest_mutants(
@@ -256,11 +351,14 @@ def suggest_mutants(
                     continue
                 variants.setdefault(residue, []).append(species)
 
+            unverified, caveat = _reliability(member)
             for mutant, species_list in variants.items():
                 d = grantham_distance(wt, mutant)
                 d = 0.0 if d != d else d
                 rsa = member.rsa if member.rsa == member.rsa else 0.0
                 priority = d * max(rsa, 0.0) * max(member.discrimination, 0.0)
+                if unverified:
+                    priority *= 0.5
                 per_patch.append(
                     MutantSuggestion(
                         patch_id=patch.patch_id,
@@ -286,6 +384,8 @@ def suggest_mutants(
                             f"{reference} background; loss of binding alone can also be "
                             "generic misfolding, so pair it with the reciprocal"
                         ),
+                        verified=not unverified,
+                        caveat=caveat,
                     )
                 )
                 for species in species_list:
@@ -308,6 +408,8 @@ def suggest_mutants(
                                 f"restores the {reference} residue in the {species} "
                                 "background; gain of binding is the convincing result"
                             ),
+                            verified=not unverified,
+                            caveat=caveat,
                         )
                     )
         per_patch.sort(key=lambda m: (-m.priority, m.direction))

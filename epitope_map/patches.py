@@ -33,16 +33,34 @@ COMPACT_SPAN = 20.0
 DIFFUSE_SPAN = 35.0
 COMPACTNESS_FLOOR = 0.4
 
+#: Two patches whose nearest members are within this distance could be contacted
+#: by one antibody, so they are reported as a candidate merged surface rather
+#: than as independent hypotheses.
+EPITOPE_SCALE = 25.0
+
+#: Radii used by --radius-sweep when the user does not name their own.
+DEFAULT_RADIUS_SWEEP = (10.0, 12.0, 14.0, 16.0, 18.0)
+
 
 @dataclass
 class Patch:
-    """A connected cluster of exposed, discriminating reference residues."""
+    """A cluster of exposed, discriminating reference residues.
+
+    ``members`` are the discriminating residues that define and score the patch.
+    ``context`` are conserved exposed residues sitting inside the same surface:
+    a real epitope contains conserved residues, and leaving them out understates
+    how large the footprint is and what a chimera would have to cover. They do
+    not contribute to the score.
+    """
 
     patch_id: str
     members: List[ResidueAnalysis] = field(default_factory=list)
+    context: List[ResidueAnalysis] = field(default_factory=list)
     rank_raw: int = 0
     rank_normalized: int = 0
     rank_combined: int = 0
+    promoted_reason: str = ""
+    neighbours: List[Tuple[str, float]] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
 
     # ---- metrics
@@ -86,6 +104,31 @@ class Patch:
     @property
     def n_discriminating(self) -> int:
         return sum(1 for m in self.members if m.discrimination > 0)
+
+    @property
+    def n_total_surface(self) -> int:
+        """Discriminating members plus the conserved surface around them."""
+        return len(self.members) + len(self.context)
+
+    @property
+    def surface_area_with_context(self) -> float:
+        return self.surface_area + sum(
+            r.sasa for r in self.context if r.sasa == r.sasa
+        )
+
+    def min_distance_to(self, other: "Patch") -> float:
+        """Closest approach between any two members - not centroid separation.
+
+        Centroid distance overstates the separation of elongated patches, which
+        is how one apical surface came back as four separate hypotheses.
+        """
+        best = float("inf")
+        for a in self.members:
+            for b in other.members:
+                if a.centroid is None or b.centroid is None:
+                    continue
+                best = min(best, distance(a.centroid, b.centroid))
+        return best
 
     @property
     def max_grantham(self) -> float:
@@ -136,6 +179,7 @@ class Patch:
         parts = [
             f"{self.size} discriminating surface residue(s) "
             f"({', '.join(self.residue_labels)})",
+            f"{len(self.context)} conserved surface residue(s) alongside",
             f"mean RSA {self.mean_rsa:.2f}",
             f"max Grantham {self.max_grantham:.0f}",
             f"spread {self.spread:.1f} A",
@@ -245,11 +289,16 @@ def find_patches(
     radius: float = DEFAULT_PATCH_RADIUS,
     min_size: int = DEFAULT_MIN_PATCH_SIZE,
     method: str = "graph",
+    rsa_cutoff: float = 0.20,
+    assign_ids: bool = True,
 ) -> Tuple[List[Patch], List[Patch]]:
     """Cluster eligible residues into patches.
 
     Returns ``(patches, singletons)``: clusters below ``min_size`` are not
     discarded, they are returned separately for a low-priority report section.
+    Conserved exposed residues within ``radius`` of a member are attached to each
+    patch as context - they do not score, but they show the real extent of the
+    surface a chimera would have to cover.
     """
     seeds = [r for r in residues if r.eligible(discrimination_cutoff)]
     if not seeds:
@@ -262,20 +311,176 @@ def find_patches(
 
     components.sort(key=lambda group: -sum(m.composite for m in group))
     ids = _patch_ids()
+    seed_indices = {r.ref_index for r in seeds}
+    context_pool = [
+        r
+        for r in residues
+        if r.ref_index not in seed_indices and r.surface_context(rsa_cutoff)
+    ]
+
     patches: List[Patch] = []
     singletons: List[Patch] = []
     for group in components:
         group.sort(key=lambda r: r.ref_index)
         patch = Patch(patch_id=next(ids), members=group)
+        patch.context = _nearby_context(group, context_pool, radius)
         _annotate(patch)
         (patches if patch.size >= min_size else singletons).append(patch)
 
     _rank(patches)
     _rank(singletons)
-    for patch in patches + singletons:
-        for member in patch.members:
-            member.patch_id = patch.patch_id
+    _link_neighbours(patches, singletons)
+    if assign_ids:
+        for patch in patches + singletons:
+            for member in patch.members:
+                member.patch_id = patch.patch_id
     return patches, singletons
+
+
+def _nearby_context(
+    members: Sequence[ResidueAnalysis],
+    pool: Sequence[ResidueAnalysis],
+    radius: float,
+) -> List[ResidueAnalysis]:
+    out = []
+    for candidate in pool:
+        if candidate.centroid is None:
+            continue
+        if any(
+            m.centroid is not None and distance(candidate.centroid, m.centroid) <= radius
+            for m in members
+        ):
+            out.append(candidate)
+    return sorted(out, key=lambda r: r.ref_index)
+
+
+def _link_neighbours(
+    patches: Sequence[Patch],
+    singletons: Sequence[Patch],
+    scale: float = EPITOPE_SCALE,
+) -> None:
+    """Record which patches are close enough to be one epitope."""
+    everything = list(patches) + list(singletons)
+    for a in everything:
+        for b in everything:
+            if a is b:
+                continue
+            gap = a.min_distance_to(b)
+            if gap <= scale:
+                a.neighbours.append((b.patch_id, gap))
+        a.neighbours.sort(key=lambda pair: pair[1])
+
+
+def merged_surfaces(
+    patches: Sequence[Patch],
+    singletons: Sequence[Patch] = (),
+    scale: float = EPITOPE_SCALE,
+) -> List[Dict[str, object]]:
+    """Group patches whose nearest members are within one antibody footprint.
+
+    A 15-22 residue epitope spans roughly 25-30 A, so patches this close are one
+    candidate surface, and it is their combined area that should be compared
+    against the 600-900 A^2 an antibody buries - not each fragment's.
+    """
+    everything = list(patches) + list(singletons)
+    if not everything:
+        return []
+    index = {patch.patch_id: i for i, patch in enumerate(everything)}
+    parent = list(range(len(everything)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for patch in everything:
+        for other_id, gap in patch.neighbours:
+            if gap <= scale and other_id in index:
+                a, b = find(index[patch.patch_id]), find(index[other_id])
+                if a != b:
+                    parent[b] = a
+
+    groups: Dict[int, List[Patch]] = {}
+    for i, patch in enumerate(everything):
+        groups.setdefault(find(i), []).append(patch)
+
+    out: List[Dict[str, object]] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        members = [m for patch in group for m in patch.members]
+        area = sum(m.sasa for m in members if m.sasa == m.sasa)
+        spread = 0.0
+        for a in members:
+            for b in members:
+                if a.centroid and b.centroid:
+                    spread = max(spread, distance(a.centroid, b.centroid))
+        out.append(
+            {
+                "patches": sorted(p.patch_id for p in group),
+                "n_residues": len(members),
+                "residues": [m.ref_number or str(m.ref_index + 1) for m in members],
+                "total_score": sum(m.composite for m in members),
+                "accessible_area_A2": area,
+                "spread_A": spread,
+                "max_gap_A": max(
+                    (gap for p in group for pid, gap in p.neighbours
+                     if pid in {q.patch_id for q in group}),
+                    default=0.0,
+                ),
+            }
+        )
+    out.sort(key=lambda entry: -float(entry["total_score"]))
+    return out
+
+
+def radius_sweep(
+    residues: Sequence[ResidueAnalysis],
+    discrimination_cutoff: float,
+    radii: Sequence[float] = DEFAULT_RADIUS_SWEEP,
+    min_size: int = DEFAULT_MIN_PATCH_SIZE,
+    method: str = "graph",
+    rsa_cutoff: float = 0.20,
+) -> List[Dict[str, object]]:
+    """Re-cluster at several radii and record what merges when.
+
+    Patches that merge at a small radius are one surface; patches still separate
+    at 18 A are genuinely distinct hypotheses. The clustering radius is the most
+    consequential free parameter in the whole pipeline and this is the only
+    honest way to show its effect.
+    """
+    saved = {r.ref_index: r.patch_id for r in residues}
+    rows: List[Dict[str, object]] = []
+    try:
+        for radius in radii:
+            patches, singletons = find_patches(
+                residues,
+                discrimination_cutoff=discrimination_cutoff,
+                radius=radius,
+                min_size=min_size,
+                method=method,
+                rsa_cutoff=rsa_cutoff,
+                assign_ids=False,
+            )
+            groups = [
+                sorted(m.ref_number or str(m.ref_index + 1) for m in patch.members)
+                for patch in patches + list(singletons)
+            ]
+            groups.sort(key=lambda g: (-len(g), g))
+            rows.append(
+                {
+                    "radius_A": radius,
+                    "n_patches": len(patches),
+                    "n_singletons": len(singletons),
+                    "largest_patch": max((len(g) for g in groups), default=0),
+                    "groupings": " | ".join(",".join(g) for g in groups),
+                }
+            )
+    finally:
+        for residue in residues:
+            residue.patch_id = saved.get(residue.ref_index)
+    return rows
 
 
 def _annotate(patch: Patch) -> None:
@@ -317,6 +522,51 @@ def _rank(patches: List[Patch]) -> None:
     )
     for rank, patch in enumerate(patches, start=1):
         patch.rank_combined = rank
+
+
+#: A singleton scoring at or above this is worth surfacing on its own.
+PROMOTION_SCORE = 0.5
+
+
+def promote_singletons(
+    singletons: Sequence[Patch],
+    patches: Sequence[Patch],
+    score_threshold: float = PROMOTION_SCORE,
+    scale: float = EPITOPE_SCALE,
+) -> Tuple[List[Patch], List[Patch]]:
+    """Split isolated residues into high- and low-priority sets.
+
+    Being alone is not evidence of being unimportant: an isolated residue is
+    filed as a singleton only because no *other above-cutoff* residue sits
+    within the clustering radius. A surface-loop insertion reshapes local
+    geometry and is a more plausible way to abolish binding than most single
+    substitutions, so it should not be buried under a dump of leftovers.
+    """
+    high: List[Patch] = []
+    low: List[Patch] = []
+    ranked_ids = {p.patch_id for p in patches}
+    for patch in singletons:
+        reasons: List[str] = []
+        member = patch.members[0]
+        if member.composite >= score_threshold:
+            reasons.append(f"composite {member.composite:.2f} above {score_threshold}")
+        if member.involves_gap:
+            reasons.append("indel - reshapes the local surface")
+        near = [
+            (pid, gap) for pid, gap in patch.neighbours if pid in ranked_ids and gap <= scale
+        ]
+        if near:
+            reasons.append(
+                f"within {near[0][1]:.0f} A of {near[0][0]}, so plausibly part of "
+                "that surface"
+            )
+        if reasons:
+            patch.promoted_reason = "; ".join(reasons)
+            high.append(patch)
+        else:
+            low.append(patch)
+    high.sort(key=lambda p: -p.members[0].composite)
+    return high, low
 
 
 def baseline_counts(

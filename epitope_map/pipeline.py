@@ -7,18 +7,31 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import __version__
-from .align import Alignment, ResidueMap, align_sequences
+from .align import (
+    CONFIDENCE_CUTOFF,
+    LOW_IDENTITY_MARGIN,
+    Alignment,
+    ResidueMap,
+    align_sequences,
+    alignment_confidence,
+    local_identity,
+)
 from .glycan import DEFAULT_GLYCAN_RADIUS, GlycanAnalysis, analyse_glycosylation
 from .io_seq import Dataset, InputError, build_dataset, load_binding_calls, load_sequences
 from .patches import (
     DEFAULT_MIN_PATCH_SIZE,
     DEFAULT_PATCH_RADIUS,
+    DEFAULT_RADIUS_SWEEP,
     Patch,
     baseline_counts,
     find_patches,
+    merged_surfaces,
+    promote_singletons,
+    radius_sweep,
 )
 from .score import (
     DEFAULT_DISCRIMINATION_CUTOFF,
+    indel_weight,
     ColumnScore,
     DegeneracyReport,
     ResidueAnalysis,
@@ -156,6 +169,7 @@ def build_residue_table(
             max_grantham=score.max_grantham,
             conserved_in_binders=score.conserved_in_binders,
             involves_gap=score.involves_gap,
+            indel_length=score.indel_length,
             has_missing=score.has_missing,
             modelled=record is not None,
             in_ectodomain=position.in_ectodomain,
@@ -176,6 +190,17 @@ def build_residue_table(
             row.centroid = record.centroid
             row.in_disordered_region = record.in_disordered_region
         row.buried = not (row.rsa == row.rsa and row.rsa >= config.rsa_cutoff)
+
+        if row.involves_gap:
+            # believe a long loop insertion; discount a one-residue gap inside a
+            # helix, which is usually the aligner's guess rather than biology
+            weight = indel_weight(row.indel_length, row.secondary_structure)
+            row.discrimination *= weight
+            if weight < 1.0:
+                row.notes.append(
+                    f"indel of {row.indel_length} residue(s) down-weighted "
+                    f"x{weight:.2f} (short, or inside a secondary-structure element)"
+                )
 
         if not row.accessible:
             # an antibody cannot reach it, so it is not a candidate at any score
@@ -208,6 +233,35 @@ def build_residue_table(
             row.mask_reasons.append("disordered_region")
         rows.append(row)
     return rows
+
+
+def _apply_alignment_reliability(
+    rows: Sequence[ResidueAnalysis],
+    confidence: Dict[int, float],
+    identity_windows: Dict[int, float],
+) -> None:
+    """Attach per-residue alignment reliability and flag the shaky windows."""
+    values = [v for v in identity_windows.values() if v == v]
+    average = sum(values) / len(values) if values else 0.0
+    for row in rows:
+        row.alignment_confidence = confidence.get(row.ref_index, float("nan"))
+        row.local_identity = identity_windows.get(row.ref_index, float("nan"))
+        if row.local_identity == row.local_identity and (
+            row.local_identity < average - LOW_IDENTITY_MARGIN
+        ):
+            row.low_identity_window = True
+            row.notes.append(
+                f"local identity {row.local_identity:.0f}% against a chain average "
+                f"of {average:.0f}%: the aligner has little to go on here"
+            )
+        if row.alignment_confidence == row.alignment_confidence and (
+            row.alignment_confidence < CONFIDENCE_CUTOFF
+        ):
+            row.notes.append(
+                f"alignment confidence {row.alignment_confidence:.2f}: different "
+                "alignment methods disagree about which residue of the other "
+                "species corresponds to this one"
+            )
 
 
 def _apply_glycan_flags(rows: Sequence[ResidueAnalysis], glycans: GlycanAnalysis) -> None:
@@ -329,10 +383,16 @@ def run_pipeline(config: RunConfig) -> RunResult:
         mismatch_tolerance=config.mismatch_tolerance,
     )
 
+    confidence, confidence_notes = alignment_confidence(
+        alignment, list(dataset.records), threads=config.threads
+    )
+    identity_windows = local_identity(alignment)
+
     column_scores = score_alignment(residue_map, dataset)
     rows = build_residue_table(
         residue_map, column_scores, structure, config, topology, domain_segments
     )
+    _apply_alignment_reliability(rows, confidence, identity_windows)
     accessible = {row.ref_index for row in rows if row.accessible}
 
     glycans = analyse_glycosylation(
@@ -360,7 +420,25 @@ def run_pipeline(config: RunConfig) -> RunResult:
         radius=config.patch_radius,
         min_size=config.min_patch_size,
         method=config.cluster_method,
+        rsa_cutoff=config.rsa_cutoff,
     )
+    promoted, singletons = promote_singletons(singletons, patches)
+    surfaces = merged_surfaces(patches, promoted)
+    sweep: List[Dict[str, object]] = []
+    if config.radius_sweep:
+        radii = (
+            list(DEFAULT_RADIUS_SWEEP)
+            if config.radius_sweep == ["auto"]
+            else config.radius_sweep
+        )
+        sweep = radius_sweep(
+            rows,
+            discrimination_cutoff=config.discrimination_cutoff,
+            radii=radii,
+            min_size=config.min_patch_size,
+            method=config.cluster_method,
+            rsa_cutoff=config.rsa_cutoff,
+        )
     chimeras = suggest_chimeras(patches, rows, residue_map, structure, top_n=config.top_n)
     mutants = suggest_mutants(patches, dataset, residue_map, top_n=config.top_n)
     counts = baseline_counts(rows, config.discrimination_cutoff)
@@ -385,8 +463,23 @@ def run_pipeline(config: RunConfig) -> RunResult:
             "the cytoplasmic tail"
         ]
 
+    unreliable = [
+        r for r in rows
+        if r.accessible
+        and r.alignment_confidence == r.alignment_confidence
+        and r.alignment_confidence < CONFIDENCE_CUTOFF
+    ]
+    if unreliable:
+        confidence_notes.append(
+            f"{len(unreliable)} accessible position(s) have alignment confidence "
+            f"below {CONFIDENCE_CUTOFF}. Point mutants there name a residue "
+            "equivalence the aligner guessed, so they are marked unverified; "
+            "chimera-level suggestions for the same region still stand"
+        )
+
     warnings_ = (
         warnings_topology
+        + confidence_notes
         + list(dataset.warnings)
         + list(alignment.warnings)
         + list(residue_map.warnings)
@@ -418,5 +511,8 @@ def run_pipeline(config: RunConfig) -> RunResult:
         counts=counts,
         topology=topology,
         domain_segments=domain_segments,
+        radius_sensitivity=sweep,
+        merged_surfaces=surfaces,
+        promoted_singletons=promoted,
         warnings=warnings_,
     )

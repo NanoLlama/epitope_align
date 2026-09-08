@@ -28,8 +28,16 @@ DEFAULT_DISCRIMINATION_CUTOFF = 0.25
 
 #: Gap-vs-residue is treated as this normalized difference: large, but flagged
 #: separately because indels are harder to interpret and to mutate than a
-#: point substitution.
+#: point substitution. It is a base value - :func:`indel_weight` scales it by
+#: how long the indel is and whether it falls in a loop.
 GAP_DIFFERENCE = 0.9
+
+#: An indel of this length or more is treated as a full-strength signal.
+INDEL_SATURATION = 3
+
+#: Indels inside a helix or strand are usually alignment artifacts rather than
+#: real insertions, so they are damped by this factor.
+INDEL_IN_ELEMENT_FACTOR = 0.5
 
 
 @dataclass
@@ -48,6 +56,7 @@ class ColumnScore:
     max_grantham: float = 0.0
     conserved_in_binders: bool = False
     involves_gap: bool = False
+    indel_length: int = 0
     has_missing: bool = False
     low_confidence: bool = False
     notes: List[str] = field(default_factory=list)
@@ -162,6 +171,21 @@ def score_column(
     return between - penalty, between, within_b, within_n
 
 
+def _gap_run_lengths(aligned: str) -> Dict[int, int]:
+    """Column -> length of the contiguous gap run it belongs to."""
+    lengths: Dict[int, int] = {}
+    start = None
+    for column, character in enumerate(aligned + "X"):
+        if character == GAP:
+            if start is None:
+                start = column
+        elif start is not None:
+            for index in range(start, column):
+                lengths[index] = column - start
+            start = None
+    return lengths
+
+
 def score_alignment(
     residue_map: ResidueMap,
     dataset: Dataset,
@@ -171,6 +195,10 @@ def score_alignment(
     non_binders = [r.name for r in dataset.non_binders]
     spans = {
         name: _span(seq) for name, seq in residue_map.alignment.sequences.items()
+    }
+    gap_runs = {
+        name: _gap_run_lengths(seq)
+        for name, seq in residue_map.alignment.sequences.items()
     }
 
     scores: List[ColumnScore] = []
@@ -210,6 +238,14 @@ def score_alignment(
             and GAP not in binder_residues
             and MISSING not in binder_residues,
             involves_gap=involves_gap,
+            indel_length=max(
+                (
+                    gap_runs[name].get(position.column, 0)
+                    for name in binders + non_binders
+                    if residues[name] == GAP
+                ),
+                default=0,
+            ),
             has_missing=has_missing,
             low_confidence=has_missing,
         )
@@ -456,6 +492,19 @@ def confidence_weight(plddt: float, low: float = 50.0, high: float = 70.0, floor
     return floor + (1.0 - floor) * t
 
 
+def indel_weight(length: int, secondary_structure: str) -> float:
+    """How much to believe an indel, from its length and where it sits.
+
+    A one-residue gap in the middle of a helix is usually the aligner's guess; a
+    three-residue insertion in a surface loop genuinely reshapes the surface. The
+    flat treatment gave both the same weight, which put alignment artifacts and
+    real loop insertions side by side in the rankings.
+    """
+    length_factor = min(1.0, max(1, int(length)) / INDEL_SATURATION)
+    in_element = str(secondary_structure).upper() in ("H", "G", "I", "E", "B")
+    return length_factor * (INDEL_IN_ELEMENT_FACTOR if in_element else 1.0)
+
+
 def composite_score(discrimination: float, rsa: float, plddt: float) -> Tuple[float, float, float]:
     """Return ``(composite, exposure_weight, confidence_weight)``."""
     e = exposure_weight(rsa)
@@ -484,6 +533,7 @@ class ResidueAnalysis:
     max_grantham: float = 0.0
     conserved_in_binders: bool = False
     involves_gap: bool = False
+    indel_length: int = 0
     has_missing: bool = False
 
     # structure
