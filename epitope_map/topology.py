@@ -434,3 +434,16 @@ def assembly_warnings(
             )
         )
     return messages
+
+
+_INTERFACE_WORDS = ("dimer", "oligomer", "interface", "dimerisation", "dimerization")
+
+
+def interface_regions(regions: Sequence[Segment]) -> List[Tuple[int, int]]:
+    """Annotated regions whose description implies a subunit interface."""
+    out: List[Tuple[int, int]] = []
+    for segment in regions:
+        text = f"{segment.description} {segment.kind}".lower()
+        if any(word in text for word in _INTERFACE_WORDS):
+            out.append((segment.start, segment.end))
+    return out

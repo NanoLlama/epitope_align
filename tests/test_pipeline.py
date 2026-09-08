@@ -118,7 +118,7 @@ def test_ectodomain_range_restricts_the_analysis(synthetic_inputs, tmp_path):
     result = run_pipeline(config)
     inside = [r for r in result.residues if r.in_ectodomain]
     assert all(60 <= int(r.ref_number.rstrip("ABC")) <= 100 for r in inside)
-    assert result.counts["in_ectodomain"] == len(inside)
+    assert result.counts["reachable"] == len([r for r in inside if r.accessible])
     assert all(
         60 <= int(m.ref_number.rstrip("ABC")) <= 100
         for patch in result.patches

@@ -109,3 +109,84 @@ def test_chimera_avoids_cutting_secondary_structure_when_dssp_is_available(
     assert chimera.ss_respected
     assert chimera.start_ref_index < patch.members[0].ref_index  # pushed out of the helix
     assert "DSSP" in chimera.note
+
+
+def _patch_with(domains, numbers):
+    from epitope_map.patches import Patch
+    from epitope_map.score import ResidueAnalysis
+
+    members = []
+    for number in numbers:
+        row = ResidueAnalysis(
+            ref_index=number - 1,
+            column=number - 1,
+            aa="K",
+            ref_number=str(number),
+            discrimination=0.8,
+            modelled=True,
+            centroid=(number * 1.0, 0.0, 0.0),
+            rsa=0.5,
+        )
+        row.domain = domains.get(number, "")
+        row.composite = 0.8
+        members.append(row)
+    return Patch(patch_id="p:test", members=members), members
+
+
+def test_domain_swap_requires_the_domain_to_contain_the_whole_patch():
+    """Regression test 1: the construct the report told the user to build.
+
+    A domain swap that omits five of six members does not test the hypothesis.
+    """
+    from epitope_map.suggest import _add_domain_swap, ChimeraSuggestion
+
+    # every member inside one domain: the swap is offered
+    patch, members = _patch_with({n: "apical" for n in (202, 208, 229)}, [202, 208, 229])
+    inside = ChimeraSuggestion(patch_id=patch.patch_id)
+    _add_domain_swap(inside, patch, {m.ref_index: m for m in members})
+    assert inside.domain_swap == "dom:apical"
+    assert not inside.domain_swap_reason
+
+    # the reported case: only 229 is inside the annotated domain
+    patch, members = _patch_with({229: "PA"}, [202, 208, 211, 213, 214, 229])
+    straddling = ChimeraSuggestion(patch_id=patch.patch_id)
+    _add_domain_swap(straddling, patch, {m.ref_index: m for m in members})
+    assert straddling.domain_swap == ""
+    assert "no_annotated_domain_contains_patch" in straddling.domain_swap_reason
+    assert "5 of 6" in straddling.domain_swap_reason
+
+    # spanning two domains is equally not a single swap
+    patch, members = _patch_with({250: "apical", 368: "protease"}, [250, 368])
+    spanning = ChimeraSuggestion(patch_id=patch.patch_id)
+    _add_domain_swap(spanning, patch, {m.ref_index: m for m in members})
+    assert spanning.domain_swap == ""
+    assert "span" in spanning.domain_swap_reason
+
+
+def test_impractical_segments_are_not_redirected_to_a_wrong_domain_swap():
+    """The fallback must not become a different, wrong recommendation."""
+    from epitope_map.suggest import (
+        ChimeraSegment,
+        ChimeraSuggestion,
+        _check_constructible,
+    )
+
+    patch, members = _patch_with({368: "protease"}, [250, 251, 276, 368])
+    by_index = {m.ref_index: m for m in members}
+    suggestion = ChimeraSuggestion(
+        patch_id=patch.patch_id,
+        segments=[
+            ChimeraSegment(i, i + 2, str(i + 1), str(i + 3), True)
+            for i in (248, 264, 364)
+        ],
+    )
+    from epitope_map.suggest import _add_domain_swap
+
+    _add_domain_swap(suggestion, patch, by_index)
+    _check_constructible(suggestion, by_index)
+
+    assert not suggestion.constructible
+    assert suggestion.domain_swap == ""
+    problems = " ".join(suggestion.problems)
+    assert "no annotated domain contains the whole patch" in problems
+    assert "use the domain-level swap instead" not in problems

@@ -565,27 +565,99 @@ IDENTITY_WINDOW = 20
 #: where the aligner is guessing.
 LOW_IDENTITY_MARGIN = 15.0
 
+#: Once a window is seeded, it extends while identity stays this far below the
+#: average. Two thresholds rather than one, because a single cutoff splits one
+#: ambiguous loop into "flagged" and "not flagged" residues either side of an
+#: arbitrary line - which reads as information about those residues and is not.
+EXTEND_MARGIN = 7.5
+
+#: Windows closer together than this are one window.
+WINDOW_MERGE_GAP = 5
+
+#: Shorter than this is noise, not a region.
+MIN_WINDOW_LENGTH = 4
+
+
+#: Fewer independent methods than this and agreement means nothing: two MAFFT
+#: settings agree with each other by construction, not because the alignment is
+#: certain.
+MIN_DECORRELATED_METHODS = 3
+
+
+def _run_clustalo(records: Sequence[SpeciesRecord]) -> Optional[Dict[str, str]]:
+    if not shutil.which("clustalo"):
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        infile = Path(tmp) / "in.fasta"
+        outfile = Path(tmp) / "out.fasta"
+        _write_fasta(records, infile)
+        try:
+            proc = subprocess.run(
+                ["clustalo", "-i", str(infile), "-o", str(outfile), "--force",
+                 "--outfmt", "fasta"],
+                capture_output=True, text=True, timeout=1800,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode == 0 and outfile.exists() and outfile.stat().st_size:
+            return _parse_aligned_fasta(outfile.read_text())
+    return None
+
+
+def _run_tcoffee(records: Sequence[SpeciesRecord]) -> Optional[Dict[str, str]]:
+    if not shutil.which("t_coffee"):
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        infile = Path(tmp) / "in.fasta"
+        _write_fasta(records, infile)
+        try:
+            proc = subprocess.run(
+                ["t_coffee", str(infile), "-output", "fasta_aln", "-quiet",
+                 "-outfile", str(Path(tmp) / "out.fasta")],
+                capture_output=True, text=True, timeout=1800, cwd=tmp,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        outfile = Path(tmp) / "out.fasta"
+        if proc.returncode == 0 and outfile.exists() and outfile.stat().st_size:
+            return _parse_aligned_fasta(outfile.read_text())
+    return None
+
 
 def _alternative_alignments(
     records: Sequence[SpeciesRecord], reference: str, threads: int = 1
-) -> List[Dict[str, str]]:
-    """Re-align the same sequences a few different ways.
+) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Re-align the same sequences by genuinely different methods.
 
-    Where MAFFT and MUSCLE are installed, their genuinely different algorithms
-    are used (local and global pair refinement). Where they are not, the
-    pairwise fallback is re-run with different gap penalties and substitution
-    matrices, which is weaker but still exposes the columns whose equivalences
-    depend on the scoring choice rather than on the sequences.
+    Returns the alignments and the names of the *decorrelated* methods that
+    produced them. Two MAFFT settings are not two methods: they share a guide
+    tree and an objective function and will agree with each other whether or not
+    the alignment is certain. Only distinct programs count towards that list.
     """
     variants: List[Dict[str, str]] = []
+    methods: List[str] = []
 
-    for extra in (["--localpair", "--maxiterate", "100"], ["--globalpair", "--maxiterate", "100"]):
-        aligned = _run_mafft(records, threads=threads, extra_args=extra)
+    mafft_local = _run_mafft(
+        records, threads=threads, extra_args=["--localpair", "--maxiterate", "100"]
+    )
+    if mafft_local:
+        variants.append(mafft_local)
+        methods.append("mafft --localpair")
+    mafft_global = _run_mafft(
+        records, threads=threads, extra_args=["--globalpair", "--maxiterate", "100"]
+    )
+    if mafft_global:
+        variants.append(mafft_global)
+        # a second MAFFT setting adds an alignment but not an independent opinion
+    for runner, name in (
+        (_run_muscle, "muscle"),
+        (_run_clustalo, "clustal omega"),
+        (_run_tcoffee, "t-coffee"),
+    ):
+        aligned = runner(records)
         if aligned:
             variants.append(aligned)
-    muscle = _run_muscle(records)
-    if muscle:
-        variants.append(muscle)
+            methods.append(name)
 
     if len(variants) < 2:
         # a deliberately wide spread: where the sequences are unambiguous every
@@ -602,7 +674,9 @@ def _alternative_alignments(
                 records, reference, open_gap=open_gap, extend_gap=extend_gap, matrix=matrix
             )
             variants.append(aligned)
-    return variants
+        # all of those are the same algorithm rescored, so they count once
+        methods.append("biopython pairwise (rescored)")
+    return variants, methods
 
 
 def _equivalences(aligned: Dict[str, str], reference: str) -> Dict[Tuple[str, int], int]:
@@ -646,14 +720,32 @@ def alignment_confidence(
     opposite this one. Low values mark loops where the region is right but the
     specific residue pairing is a guess - the case where a chimera is safe and a
     point mutant is not.
+
+    Agreement is only evidence if the methods could have disagreed. With fewer
+    than :data:`MIN_DECORRELATED_METHODS` genuinely different programs available
+    the result is returned as NaN with a warning, rather than as a confident
+    1.0 that is really a statement about the tooling installed.
     """
     warnings_: List[str] = []
     try:
-        variants = _alternative_alignments(records, alignment.reference, threads=threads)
+        variants, methods = _alternative_alignments(
+            records, alignment.reference, threads=threads
+        )
     except Exception as exc:  # pragma: no cover - defensive
         return {}, [f"alignment confidence could not be computed: {exc}"]
     if not variants:
         return {}, ["alignment confidence could not be computed: no alternative alignment"]
+
+    if len(methods) < MIN_DECORRELATED_METHODS:
+        return {}, [
+            f"alignment_confidence is UNINFORMATIVE in this run: only "
+            f"{len(methods)} independent alignment method(s) available "
+            f"({', '.join(methods)}). Agreement between settings of the same "
+            "program is not evidence that a column is certain, so confidence is "
+            "reported as blank rather than as 1.0. Install MUSCLE and Clustal "
+            "Omega alongside MAFFT to make this measure work; until then "
+            "ambiguity is flagged from low-identity windows alone."
+        ]
 
     baseline = _equivalences(alignment.sequences, alignment.reference)
     others = [_equivalences(v, alignment.reference) for v in variants]
@@ -669,13 +761,10 @@ def alignment_confidence(
                 agreements.append(1.0 if variant.get((name, ref_index)) == expected else 0.0)
         confidence[ref_index] = sum(agreements) / len(agreements) if agreements else 1.0
 
-    method_note = (
-        f"alignment confidence from {len(variants)} alternative alignment(s)"
-        if any(shutil.which(tool) for tool in ("mafft", "muscle"))
-        else "alignment confidence from re-scored pairwise alignments only "
-        "(MAFFT/MUSCLE not installed), which understates the uncertainty"
+    warnings_.append(
+        f"alignment confidence from {len(methods)} independent method(s) "
+        f"({', '.join(methods)}) over {len(variants)} alignment(s)"
     )
-    warnings_.append(method_note)
     return confidence, warnings_
 
 
@@ -711,3 +800,95 @@ def local_identity(
         chunk = per_position[low:high]
         out[index] = sum(chunk) / len(chunk) if chunk else 0.0
     return out
+
+
+@dataclass
+class IdentityWindow:
+    """A contiguous stretch where the aligner has little to go on."""
+
+    start: int  # reference index, inclusive
+    end: int  # reference index, inclusive
+    identity: float
+
+    def contains(self, ref_index: int) -> bool:
+        return self.start <= ref_index <= self.end
+
+    def label(self, residue_map=None) -> str:
+        if residue_map is not None:
+            first = residue_map.number_of(self.start) or str(self.start + 1)
+            last = residue_map.number_of(self.end) or str(self.end + 1)
+        else:
+            first, last = str(self.start + 1), str(self.end + 1)
+        return f"{first}-{last} ({self.identity:.0f}% identity)"
+
+
+def low_identity_windows(
+    identity: Dict[int, float],
+    margin: float = LOW_IDENTITY_MARGIN,
+    extend_margin: float = EXTEND_MARGIN,
+    merge_gap: int = WINDOW_MERGE_GAP,
+    min_length: int = MIN_WINDOW_LENGTH,
+) -> List[IdentityWindow]:
+    """Find the ambiguous regions, and mark them whole.
+
+    Seeded where identity falls ``margin`` points below the chain average and
+    extended while it stays ``extend_margin`` below, so an ambiguous loop is
+    reported as one region rather than as a handful of residues that happened to
+    fall the wrong side of a cutoff.
+    """
+    if not identity:
+        return []
+    values = [v for v in identity.values() if v == v]
+    if not values:
+        return []
+    average = sum(values) / len(values)
+    seed_level = average - margin
+    extend_level = average - extend_margin
+    positions = sorted(identity)
+
+    seeds = [i for i in positions if identity[i] < seed_level]
+    if not seeds:
+        return []
+
+    windows: List[List[int]] = []
+    for index in seeds:
+        if windows and index - windows[-1][-1] <= merge_gap:
+            windows[-1].append(index)
+        else:
+            windows.append([index])
+
+    out: List[IdentityWindow] = []
+    for window in windows:
+        start, end = window[0], window[-1]
+        while start - 1 in identity and identity[start - 1] < extend_level:
+            start -= 1
+        while end + 1 in identity and identity[end + 1] < extend_level:
+            end += 1
+        if end - start + 1 < min_length:
+            continue
+        span = [identity[i] for i in range(start, end + 1) if i in identity]
+        out.append(
+            IdentityWindow(
+                start=start, end=end, identity=sum(span) / len(span) if span else 0.0
+            )
+        )
+
+    merged: List[IdentityWindow] = []
+    for window in out:
+        if merged and window.start - merged[-1].end <= merge_gap:
+            previous = merged.pop()
+            span = [
+                identity[i]
+                for i in range(previous.start, window.end + 1)
+                if i in identity
+            ]
+            merged.append(
+                IdentityWindow(
+                    start=previous.start,
+                    end=window.end,
+                    identity=sum(span) / len(span) if span else 0.0,
+                )
+            )
+        else:
+            merged.append(window)
+    return merged

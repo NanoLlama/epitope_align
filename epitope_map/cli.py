@@ -14,7 +14,11 @@ from .pipeline import DEFAULT_RSA_CUTOFF, RunConfig, run_pipeline
 from .report import write_all
 from .score import DEFAULT_DISCRIMINATION_CUTOFF
 from .glycan import DEFAULT_GLYCAN_RADIUS
-from .patches import DEFAULT_MIN_PATCH_SIZE, DEFAULT_PATCH_RADIUS
+from .patches import (
+    DEFAULT_MIN_PATCH_SIZE,
+    DEFAULT_PATCH_RADIUS,
+    FOOTPRINT_DIAMETER,
+)
 from .structure import StructureError
 
 
@@ -148,6 +152,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patch-radius", type=float, default=DEFAULT_PATCH_RADIUS)
     parser.add_argument("--min-patch-size", type=int, default=DEFAULT_MIN_PATCH_SIZE)
     parser.add_argument("--glycan-radius", type=float, default=DEFAULT_GLYCAN_RADIUS)
+    parser.add_argument(
+        "--footprint-diameter",
+        type=float,
+        default=FOOTPRINT_DIAMETER,
+        help="maximum span a candidate merged surface may reach; patches are "
+        "grouped only while every member stays inside one antibody footprint",
+    )
     parser.add_argument(
         "--cluster-method", choices=("graph", "dbscan"), default="graph"
     )
@@ -288,6 +299,9 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         patch_radius=float(values.get("patch_radius", DEFAULT_PATCH_RADIUS)),
         min_patch_size=int(values.get("min_patch_size", DEFAULT_MIN_PATCH_SIZE)),
         glycan_radius=float(values.get("glycan_radius", DEFAULT_GLYCAN_RADIUS)),
+        footprint_diameter=float(
+            values.get("footprint_diameter", FOOTPRINT_DIAMETER)
+        ),
         cluster_method=str(values.get("cluster_method", "graph")),
         aligner=str(values.get("aligner", "auto")),
         threads=int(values.get("threads", 1)),

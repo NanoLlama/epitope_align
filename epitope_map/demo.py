@@ -386,3 +386,29 @@ def write_species_structure(
     lines.append("END")
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def write_two_lobe_pdb(path: Path, lobe_size: int = 70, separation: float = 34.0) -> Path:
+    """Two packed globules joined by a short linker.
+
+    A real domain decomposition should find two units here and exactly one on
+    the single ball, which is the difference between describing the fold and
+    inventing boundaries.
+    """
+    points = _fcc_ball(lobe_size, LATTICE_SPACING)
+    lines: List[str] = ["HEADER    SYNTHETIC TWO-DOMAIN STRUCTURE"]
+    serial = 1
+    number = 1
+    for lobe, offset in enumerate((0.0, separation)):
+        for x, y, z in points:
+            for name, dx in (("N", -1.2), ("CA", 0.0), ("C", 1.2), ("O", 1.6)):
+                lines.append(
+                    f"ATOM  {serial:5d}  {name:<3s} ALA A{number:4d} "
+                    f"   {x + dx + offset:8.3f}{y:8.3f}{z:8.3f}  1.00 90.00"
+                    f"          {name[0]:>2s}"
+                )
+                serial += 1
+            number += 1
+    lines.append("END")
+    path.write_text("\n".join(lines) + "\n")
+    return path

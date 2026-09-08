@@ -7,11 +7,11 @@ arrangement separates a plausible epitope from scattered neutral drift.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import math
-import string
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from .score import ResidueAnalysis
 from .structure import distance
@@ -42,6 +42,10 @@ EPITOPE_SCALE = 25.0
 #: this cannot be covered by one paratope however close its fragments are.
 EPITOPE_MAX_SPAN = 30.0
 
+#: Maximum diameter a candidate merged surface may reach while it is being
+#: grown. Exposed as --footprint-diameter.
+FOOTPRINT_DIAMETER = 30.0
+
 #: Radii used by --radius-sweep when the user does not name their own.
 DEFAULT_RADIUS_SWEEP = (10.0, 12.0, 14.0, 16.0, 18.0)
 
@@ -64,6 +68,9 @@ class Patch:
     rank_normalized: int = 0
     rank_combined: int = 0
     promoted_reason: str = ""
+    membership: str = ""
+    confidence_penalty: float = 1.0
+    penalty_reasons: List[str] = field(default_factory=list)
     neighbours: List[Tuple[str, float]] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
 
@@ -73,8 +80,18 @@ class Patch:
         return len(self.members)
 
     @property
-    def total_score(self) -> float:
+    def raw_total_score(self) -> float:
         return sum(m.composite for m in self.members)
+
+    @property
+    def total_score(self) -> float:
+        """Summed composite, after any confidence penalty.
+
+        A penalty here is not cosmetic: a patch sitting on an unmodelled
+        oligomer interface, or one that is entirely glycan-proximal, is a weaker
+        hypothesis than its residue scores suggest and should rank as one.
+        """
+        return self.raw_total_score * self.confidence_penalty
 
     @property
     def mean_score(self) -> float:
@@ -197,11 +214,27 @@ class Patch:
         return "; ".join(parts)
 
 
-def _patch_ids() -> Iterable[str]:
-    letters = string.ascii_uppercase
-    for size in range(1, 3):
-        for combo in itertools.product(letters, repeat=size):
-            yield "P" + "".join(combo)
+def patch_identifier(members: Sequence[ResidueAnalysis]) -> str:
+    """A patch's name, derived from its contents rather than its rank.
+
+    Letters assigned by score order are reassigned whenever anything shifts, so
+    "patch PD" in yesterday's notes silently means a different set of residues
+    today - which matters for a tool whose whole purpose is re-running under
+    changed parameters. Naming a patch after its lowest member residue is
+    stable, unique (a residue belongs to one patch) and readable at a glance.
+    """
+    if not members:
+        return "p:empty"
+    lowest = min(members, key=lambda m: m.ref_index)
+    return f"p:{lowest.ref_number or lowest.ref_index + 1}"
+
+
+def membership_hash(members: Sequence[ResidueAnalysis]) -> str:
+    """Short digest of the exact membership, for spotting drift between runs."""
+    key = ",".join(
+        sorted(str(m.ref_number or m.ref_index + 1) for m in members)
+    )
+    return hashlib.sha1(key.encode()).hexdigest()[:8]
 
 
 def _connected_components(
@@ -314,7 +347,6 @@ def find_patches(
         components = _connected_components(seeds, radius)
 
     components.sort(key=lambda group: -sum(m.composite for m in group))
-    ids = _patch_ids()
     seed_indices = {r.ref_index for r in seeds}
     context_pool = [
         r
@@ -326,7 +358,7 @@ def find_patches(
     singletons: List[Patch] = []
     for group in components:
         group.sort(key=lambda r: r.ref_index)
-        patch = Patch(patch_id=next(ids), members=group)
+        patch = Patch(patch_id=patch_identifier(group), members=group)
         patch.context = _nearby_context(group, context_pool, radius)
         _annotate(patch)
         (patches if patch.size >= min_size else singletons).append(patch)
@@ -378,75 +410,107 @@ def _link_neighbours(
 def merged_surfaces(
     patches: Sequence[Patch],
     singletons: Sequence[Patch] = (),
-    scale: float = EPITOPE_SCALE,
+    footprint_diameter: float = FOOTPRINT_DIAMETER,
+    max_groups: int = 6,
 ) -> List[Dict[str, object]]:
-    """Group patches whose nearest members are within one antibody footprint.
+    """Candidate surfaces an antibody could actually cover, grown by diameter.
 
-    A 15-22 residue epitope spans roughly 25-30 A, so patches this close are one
-    candidate surface, and it is their combined area that should be compared
-    against the 600-900 A^2 an antibody buries - not each fragment's.
+    Transitive closure at any link distance collapses to the whole protein on a
+    real target - every patch is within 25 A of some other patch - and returns
+    one useless group labelled "too large". Growing by *diameter* instead asks
+    the question that matters: is there a set of patches whose members all fit
+    inside one footprint? A merge that would breach the diameter is rejected
+    rather than accepted and then apologised for.
+
+    Groups are seeded from each patch in turn, so they overlap; that is expected
+    and they are reported as alternative groupings.
     """
-    everything = list(patches) + list(singletons)
+    everything = [p for p in list(patches) + list(singletons) if p.members]
     if not everything:
         return []
-    index = {patch.patch_id: i for i, patch in enumerate(everything)}
-    parent = list(range(len(everything)))
 
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
+    gaps: Dict[Tuple[str, str], float] = {}
+    for a in everything:
+        for b in everything:
+            if a.patch_id != b.patch_id:
+                gaps[(a.patch_id, b.patch_id)] = a.min_distance_to(b)
 
-    for patch in everything:
-        for other_id, gap in patch.neighbours:
-            if gap <= scale and other_id in index:
-                a, b = find(index[patch.patch_id]), find(index[other_id])
-                if a != b:
-                    parent[b] = a
+    seen: Dict[frozenset, Dict[str, object]] = {}
+    for seed in sorted(everything, key=lambda p: -p.total_score):
+        group = [seed]
+        members = list(seed.members)
+        while True:
+            best, best_score = None, 0.0
+            for candidate in everything:
+                if candidate in group:
+                    continue
+                # only consider patches that touch the group at all
+                if min(
+                    gaps[(candidate.patch_id, member.patch_id)] for member in group
+                ) > footprint_diameter:
+                    continue
+                combined = members + candidate.members
+                if _diameter(combined) > footprint_diameter:
+                    continue  # the merge that would breach the footprint is refused
+                if candidate.total_score > best_score:
+                    best, best_score = candidate, candidate.total_score
+            if best is None:
+                break
+            group.append(best)
+            members = members + best.members
 
-    groups: Dict[int, List[Patch]] = {}
-    for i, patch in enumerate(everything):
-        groups.setdefault(find(i), []).append(patch)
-
-    out: List[Dict[str, object]] = []
-    for group in groups.values():
         if len(group) < 2:
             continue
-        members = [m for patch in group for m in patch.members]
-        area = sum(m.sasa for m in members if m.sasa == m.sasa)
-        spread = 0.0
-        for a in members:
-            for b in members:
-                if a.centroid and b.centroid:
-                    spread = max(spread, distance(a.centroid, b.centroid))
-        members.sort(key=lambda m: m.ref_index)
-        verdict = "plausible single epitope"
-        if spread > EPITOPE_MAX_SPAN or area > 1.5 * TYPICAL_EPITOPE_BSA[1]:
-            verdict = (
-                "too large for one antibody footprint - treat as neighbouring "
-                "surfaces, not one epitope"
-            )
-        elif len(members) > TYPICAL_EPITOPE_RESIDUES[1]:
-            verdict = "larger than a typical epitope; the true footprint is a subset"
-        out.append(
-            {
-                "patches": sorted(p.patch_id for p in group),
-                "n_residues": len(members),
-                "verdict": verdict,
-                "residues": [m.ref_number or str(m.ref_index + 1) for m in members],
-                "total_score": sum(m.composite for m in members),
-                "accessible_area_A2": area,
-                "spread_A": spread,
-                "max_gap_A": max(
-                    (gap for p in group for pid, gap in p.neighbours
-                     if pid in {q.patch_id for q in group}),
-                    default=0.0,
+        key = frozenset(p.patch_id for p in group)
+        if key in seen:
+            continue
+
+        unique: Dict[int, ResidueAnalysis] = {m.ref_index: m for m in members}
+        residues = sorted(unique.values(), key=lambda m: m.ref_index)
+        # union, not a sum of independently computed patch areas: overlapping
+        # neighbourhoods double-count, which inflated the old figure
+        area = sum(m.sasa for m in residues if m.sasa == m.sasa)
+        seen[key] = {
+            "patches": sorted(p.patch_id for p in group),
+            "n_residues": len(residues),
+            "verdict": _surface_verdict(residues, _diameter(residues), area),
+            "residues": [m.ref_number or str(m.ref_index + 1) for m in residues],
+            "total_score": sum(m.composite for m in residues),
+            "accessible_area_A2": area,
+            "spread_A": _diameter(residues),
+            "max_gap_A": max(
+                (
+                    gaps[(a.patch_id, b.patch_id)]
+                    for a in group
+                    for b in group
+                    if a.patch_id != b.patch_id
                 ),
-            }
+                default=0.0,
+            ),
+        }
+
+    out = sorted(seen.values(), key=lambda entry: -float(entry["total_score"]))
+    return out[:max_groups]
+
+
+def _diameter(members: Sequence[ResidueAnalysis]) -> float:
+    points = [m.centroid for m in members if m.centroid is not None]
+    if len(points) < 2:
+        return 0.0
+    return max(distance(a, b) for a, b in itertools.combinations(points, 2))
+
+
+def _surface_verdict(
+    residues: Sequence[ResidueAnalysis], spread: float, area: float
+) -> str:
+    if spread > EPITOPE_MAX_SPAN or area > 1.5 * TYPICAL_EPITOPE_BSA[1]:
+        return (
+            "too large for one antibody footprint - treat as neighbouring "
+            "surfaces, not one epitope"
         )
-    out.sort(key=lambda entry: -float(entry["total_score"]))
-    return out
+    if len(residues) > TYPICAL_EPITOPE_RESIDUES[1]:
+        return "larger than a typical epitope; the true footprint is a subset"
+    return "plausible single epitope"
 
 
 def radius_sweep(
@@ -560,6 +624,10 @@ def _rank(patches: List[Patch]) -> None:
 #: A singleton scoring at or above this is worth surfacing on its own.
 PROMOTION_SCORE = 0.5
 
+#: An indel promotes itself only if its geometry says it reshapes the surface;
+#: a gap inside a helix is an alignment artifact and stays in the leftovers.
+PROMOTION_INDEL_SCORE = 0.35
+
 
 def promote_singletons(
     singletons: Sequence[Patch],
@@ -583,8 +651,16 @@ def promote_singletons(
         member = patch.members[0]
         if member.composite >= score_threshold:
             reasons.append(f"composite {member.composite:.2f} above {score_threshold}")
-        if member.involves_gap:
-            reasons.append("indel - reshapes the local surface")
+        if member.involves_gap and (
+            member.indel_score != member.indel_score
+            or member.indel_score >= PROMOTION_INDEL_SCORE
+        ):
+            reasons.append(
+                f"indel (indel_score {member.indel_score:.2f}) - reshapes the "
+                "local surface"
+                if member.indel_score == member.indel_score
+                else "indel - reshapes the local surface"
+            )
         near = [
             (pid, gap) for pid, gap in patch.neighbours if pid in ranked_ids and gap <= scale
         ]
@@ -602,18 +678,67 @@ def promote_singletons(
     return high, low
 
 
+#: How much a patch's score is discounted when it sits on an interface the
+#: structure does not model, or when it is entirely glycan-proximal.
+OLIGOMER_PENALTY = 0.6
+GLYCAN_PENALTY = 0.6
+
+
+def apply_confidence_penalties(
+    patches: Sequence[Patch],
+    oligomer_unmodelled: bool,
+    interface_regions: Sequence[Tuple[int, int]] = (),
+) -> None:
+    """Let the warnings reach the ranking instead of only the prose.
+
+    A patch on an oligomer interface the structure does not model, and a patch
+    every member of which is glycan-proximal, are both weaker hypotheses than
+    their residue scores suggest. Saying so in a warning while ranking them
+    alongside everything else leaves the reader to apply the discount by hand.
+    """
+    for patch in patches:
+        penalty = 1.0
+        if patch.members and all(m.glycan_flags for m in patch.members):
+            penalty *= GLYCAN_PENALTY
+            patch.penalty_reasons.append(
+                "every member is within reach of a differential glycosylation "
+                "sequon, so this is a glycan hypothesis rather than a surface "
+                f"one - score discounted x{GLYCAN_PENALTY}"
+            )
+        if oligomer_unmodelled and interface_regions:
+            inside = [
+                m
+                for m in patch.members
+                if any(
+                    start <= m.ref_index + 1 <= end for start, end in interface_regions
+                )
+            ]
+            if inside:
+                penalty *= OLIGOMER_PENALTY
+                patch.penalty_reasons.append(
+                    f"{len(inside)} member(s) lie in an annotated "
+                    "oligomerisation/interface region that this monomer "
+                    "structure does not model, so their exposure is overstated "
+                    f"- score discounted x{OLIGOMER_PENALTY}"
+                )
+        patch.confidence_penalty = penalty
+        patch.flags.extend(patch.penalty_reasons)
+
+
 def baseline_counts(
     residues: Sequence[ResidueAnalysis], discrimination_cutoff: float
 ) -> Dict[str, int]:
     """Candidate-set sizes at each narrowing step, for the enrichment table."""
     total = len(residues)
-    in_range = [r for r in residues if r.in_ectodomain]
+    # "within the analysed range" has to mean reachable, or the row contradicts
+    # the topology exclusion reported directly above it
+    in_range = [r for r in residues if r.accessible]
     discriminating = [r for r in in_range if r.discrimination >= discrimination_cutoff]
     exposed = [r for r in discriminating if not r.buried and r.modelled]
     unmasked = [r for r in exposed if not r.masked]
     return {
         "all_reference_residues": total,
-        "in_ectodomain": len(in_range),
+        "reachable": len(in_range),
         "discriminating": len(discriminating),
         "discriminating_and_exposed": len(exposed),
         "after_context_masking": len(unmasked),

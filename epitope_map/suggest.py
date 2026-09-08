@@ -64,6 +64,7 @@ class ChimeraSuggestion:
     constructible: bool = True
     problems: List[str] = field(default_factory=list)
     domain_swap: str = ""
+    domain_swap_reason: str = ""
 
     @property
     def start_ref_index(self) -> int:
@@ -232,8 +233,8 @@ def suggest_chimeras(
             n_discriminating_included=n_disc,
             note=note,
         )
-        _check_constructible(suggestion, by_ref_index)
         _add_domain_swap(suggestion, patch, by_ref_index)
+        _check_constructible(suggestion, by_ref_index)
         suggestions.append(suggestion)
     return suggestions
 
@@ -268,7 +269,14 @@ def _check_constructible(
     if len(suggestion.segments) > MAX_SEGMENTS:
         problems.append(
             f"{len(suggestion.segments)} separate segments is not a practical "
-            "construct; use the domain-level swap instead"
+            "construct"
+            + (
+                "; use the domain-level swap instead"
+                if suggestion.domain_swap
+                else " and no annotated domain contains the whole patch, so "
+                "there is no domain-level fallback either - narrow the patch "
+                "(try --patch-radius) or test its segments separately"
+            )
         )
     suggestion.problems = problems
     suggestion.constructible = not problems
@@ -279,18 +287,37 @@ def _add_domain_swap(
     patch: Patch,
     by_ref_index: Dict[int, ResidueAnalysis],
 ) -> None:
-    """Name a whole-domain swap when the patch sits inside one annotated domain.
+    """Name a whole-domain swap only when the domain contains the whole patch.
 
-    When the top patches fall in different domains, one domain swap distinguishes
-    them in a single experiment - which beats stitching six segments together.
+    A domain swap that omits five of a patch's six members is a wrong construct,
+    and it was being offered as the fallback when the segment list was declared
+    impractical - so the tool's own advice pointed at the one experiment
+    guaranteed not to test its own hypothesis. Every member must be inside the
+    domain, or no swap is offered and the reason is recorded.
     """
-    domains = {
-        by_ref_index[m.ref_index].domain
+    assignments = [
+        by_ref_index[m.ref_index].domain if m.ref_index in by_ref_index else ""
         for m in patch.members
-        if m.ref_index in by_ref_index and by_ref_index[m.ref_index].domain
-    }
-    if len(domains) == 1:
-        suggestion.domain_swap = domains.pop()
+    ]
+    named = {d for d in assignments if d}
+    if len(named) == 1 and all(assignments):
+        suggestion.domain_swap = f"dom:{named.pop()}"
+        return
+
+    suggestion.domain_swap = ""
+    if not named:
+        suggestion.domain_swap_reason = "no_annotated_domain_contains_patch"
+    else:
+        outside = sum(1 for d in assignments if not d)
+        suggestion.domain_swap_reason = (
+            "no_annotated_domain_contains_patch: "
+            + (
+                f"{outside} of {len(assignments)} member(s) lie outside any "
+                "annotated domain"
+                if outside
+                else f"members span {len(named)} domains ({', '.join(sorted(named))})"
+            )
+        )
 
 
 def _reliability(member: ResidueAnalysis) -> Tuple[bool, str]:
@@ -310,7 +337,12 @@ def _reliability(member: ResidueAnalysis) -> Tuple[bool, str]:
             f"alignment confidence {member.alignment_confidence:.2f}"
         )
     if member.low_identity_window:
-        reasons.append(f"local identity {member.local_identity:.0f}%")
+        # the whole window is uncertain, not this residue in particular
+        reasons.append(
+            f"inside low-identity window {member.identity_window}"
+            if member.identity_window
+            else "inside a low-identity window"
+        )
     if member.involves_gap:
         reasons.append("indel-bearing column")
     if not reasons:

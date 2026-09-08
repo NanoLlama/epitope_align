@@ -9,9 +9,11 @@ import pytest
 
 from epitope_map.align import (
     CONFIDENCE_CUTOFF,
+    MIN_DECORRELATED_METHODS,
     align_sequences,
     alignment_confidence,
     local_identity,
+    low_identity_windows,
 )
 from epitope_map.io_seq import SpeciesRecord
 
@@ -42,23 +44,32 @@ def reliability():
     return alignment, confidence, notes
 
 
-def test_confidence_is_lower_in_the_ambiguous_window(reliability):
-    """Regression test 4: the indel-rich loop must not look as safe as the frame."""
-    _, confidence, _ = reliability
-    head = range(len(CONSERVED_HEAD))
-    window = range(len(CONSERVED_HEAD), len(CONSERVED_HEAD) + len(AMBIGUOUS["mouse"]))
+def _decorrelated_methods_available():
+    import shutil
 
-    frame_mean = sum(confidence[i] for i in head) / len(head)
-    window_mean = sum(confidence[i] for i in window) / len(window)
-    assert frame_mean > window_mean
-    assert frame_mean > 0.9
-    assert min(confidence[i] for i in window) < CONFIDENCE_CUTOFF
+    return sum(
+        1 for tool in ("muscle", "clustalo", "t_coffee") if shutil.which(tool)
+    ) + (1 if shutil.which("mafft") else 0)
+
+
+def test_confidence_is_blank_rather_than_1_when_nothing_could_disagree(reliability):
+    """Regression test 4: agreement between settings of one program is not evidence."""
+    if _decorrelated_methods_available() >= MIN_DECORRELATED_METHODS:
+        pytest.skip("enough independent aligners are installed to compute it")
+    _, confidence, notes = reliability
+    assert confidence == {}                      # not a page of 1.0s
+    assert any("UNINFORMATIVE" in note for note in notes)
+    assert any("not evidence" in note for note in notes)
+    assert any("Install MUSCLE" in note for note in notes)
 
 
 def test_confidence_reports_how_it_was_computed(reliability):
     _, _, notes = reliability
     assert notes
-    assert any("alignment confidence" in note for note in notes)
+    assert any(
+        "alignment confidence" in note or "alignment_confidence" in note
+        for note in notes
+    )
 
 
 def test_local_identity_dips_in_the_ambiguous_window(reliability):
@@ -69,15 +80,49 @@ def test_local_identity_dips_in_the_ambiguous_window(reliability):
     assert frame > middle
 
 
-def test_conserved_alignment_is_confident_throughout():
+def test_ambiguity_is_flagged_as_a_window_not_residue_by_residue(reliability):
+    """The whole loop is uncertain; a cutoff crossing inside it means nothing."""
+    alignment, _, _ = reliability
+    identity = local_identity(alignment, window=8)
+    windows = low_identity_windows(identity)
+    assert windows, "the indel-rich loop should be detected"
+
+    ambiguous = range(
+        len(CONSERVED_HEAD), len(CONSERVED_HEAD) + len(AMBIGUOUS["mouse"])
+    )
+    covered = {i for w in windows for i in range(w.start, w.end + 1)}
+    overlap = covered & set(ambiguous)
+    assert len(overlap) >= 0.6 * len(ambiguous)
+
+    # and the conserved frame is left alone
+    assert not covered & set(range(10))
+
+    window = windows[0]
+    assert 0 <= window.identity <= 100
+    assert "identity" in window.label()
+
+
+def test_a_uniformly_conserved_alignment_has_no_ambiguous_window():
     records = [
         SpeciesRecord(name=name, sequence=CONSERVED_HEAD + CONSERVED_TAIL)
         for name in ("mouse", "rat", "human")
     ]
     records[2].sequence = records[2].sequence.replace("GYTLDD", "GYTLED")
     alignment = align_sequences(records, reference="mouse")
-    confidence, _ = alignment_confidence(alignment, records)
-    assert min(confidence.values()) >= CONFIDENCE_CUTOFF
+    assert low_identity_windows(local_identity(alignment, window=8)) == []
+
+
+def test_window_marks_every_residue_in_it_uniformly():
+    """The reported failure: 61% flagged, 67% and 63% not, all one loop."""
+    identity = {i: 90.0 for i in range(60)}
+    for i, value in zip(range(20, 32), [67.5, 61.0, 63.4, 58.0, 62.0, 66.0,
+                                        59.0, 64.0, 61.5, 68.0, 62.5, 65.0]):
+        identity[i] = value
+    windows = low_identity_windows(identity)
+    assert len(windows) == 1
+    window = windows[0]
+    assert window.start <= 20 and window.end >= 31
+    assert all(window.contains(i) for i in range(20, 32))
 
 
 def test_unverified_mutants_are_marked_and_deprioritised():
@@ -89,13 +134,15 @@ def test_unverified_mutants_are_marked_and_deprioritised():
     loose = ResidueAnalysis(ref_index=3, column=3, aa="K", alignment_confidence=1.0)
     loose.low_identity_window = True
     loose.local_identity = 41.0
+    loose.identity_window = "195-235 (58% identity)"
 
     assert _reliability(solid) == (False, "")
     assert _reliability(shaky)[0] is True
     assert "alignment confidence 0.40" in _reliability(shaky)[1]
     assert "swap the segment" in _reliability(shaky)[1]
     assert _reliability(loose)[0] is True
-    assert "local identity 41%" in _reliability(loose)[1]
+    # the window is named, not the individual residue's identity value
+    assert "195-235 (58% identity)" in _reliability(loose)[1]
 
 
 def test_patch_containing_ambiguous_columns_is_flagged():

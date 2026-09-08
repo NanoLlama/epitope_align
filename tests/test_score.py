@@ -168,3 +168,40 @@ def test_background_rate_is_reported_for_calibration():
     assert report.background_fraction == report.background_fraction  # not NaN
     assert report.n_labelings > 0
     assert report.exhaustive is True
+
+
+def test_indel_in_a_buried_helix_scores_below_one_in_an_exposed_coil():
+    """Regression test 5: same length, opposite geometry, opposite verdict."""
+    from epitope_map.score import indel_score
+
+    coil = indel_score(2, "-", rsa=0.75, flank_rsa=0.6, distance_to_patch=12.0)
+    helix = indel_score(2, "H", rsa=0.05, flank_rsa=0.05, distance_to_patch=12.0)
+    assert coil > helix
+    assert coil > 0.5
+    assert helix < 0.1
+
+
+def test_a_single_residue_surface_insertion_is_not_crushed():
+    """The overcorrection: a real rodent-specific insertion fell to 0.25."""
+    from epitope_map.score import indel_score, indel_weight
+
+    # the sequence signal is only damped for the artifact case, not for length
+    assert indel_weight(1, "-") == 1.0
+    assert indel_weight(3, "-") == 1.0
+    assert indel_weight(1, "H") < 1.0
+    # and the geometric score still rates a lone exposed insertion as real
+    assert indel_score(1, "-", rsa=0.86, flank_rsa=0.6, distance_to_patch=14.0) >= 0.5
+
+
+def test_indel_score_rewards_length_exposure_and_proximity():
+    from epitope_map.score import indel_score
+
+    base = dict(secondary_structure="-", rsa=0.6, flank_rsa=0.6, distance_to_patch=10.0)
+    assert indel_score(length=3, **base) > indel_score(length=1, **base)
+    exposed = indel_score(2, "-", rsa=0.8, flank_rsa=0.8, distance_to_patch=10.0)
+    buried = indel_score(2, "-", rsa=0.02, flank_rsa=0.02, distance_to_patch=10.0)
+    assert exposed > buried
+    near = indel_score(2, "-", rsa=0.6, flank_rsa=0.6, distance_to_patch=10.0)
+    far = indel_score(2, "-", rsa=0.6, flank_rsa=0.6, distance_to_patch=120.0)
+    assert near > far
+    assert 0.0 <= far <= 1.0

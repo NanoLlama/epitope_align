@@ -8,6 +8,7 @@ from epitope_map.patches import (
     MAX_PLAUSIBLE_SPREAD,
     baseline_counts,
     find_patches,
+    membership_hash,
     merged_surfaces,
     promote_singletons,
     radius_sweep,
@@ -127,9 +128,10 @@ def test_baseline_counts_track_each_narrowing_step():
     residues[1].buried = True
     residues[1].mask_reasons.append("buried")
     residues[2].in_ectodomain = False
+    residues[2].accessible = False
     counts = baseline_counts(residues, 0.25)
     assert counts["all_reference_residues"] == 5
-    assert counts["in_ectodomain"] == 4
+    assert counts["reachable"] == 4
     assert counts["discriminating"] == 3
     assert counts["discriminating_and_exposed"] == 2
     assert counts["after_context_masking"] == 2
@@ -219,3 +221,158 @@ def test_singleton_near_a_ranked_patch_is_promoted():
     assert [p.members[0].ref_index for p in high] == [40]
     assert "plausibly part of" in high[0].promoted_reason
     assert not low
+
+
+def test_patch_ids_are_derived_from_content_not_rank():
+    """Regression test 2: 'patch PD' must mean the same residues after a re-run."""
+    strong = [residue(200 + i, (i * 3.0, 0.0, 0.0), composite=0.9) for i in range(3)]
+    weak = [residue(50 + i, (100.0 + i * 3.0, 0.0, 0.0), composite=0.2) for i in range(3)]
+
+    first, _ = find_patches(strong + weak, discrimination_cutoff=0.25, radius=12.0)
+    again, _ = find_patches(
+        [
+            residue(r.ref_index, r.centroid, composite=r.composite)
+            for r in strong + weak
+        ],
+        discrimination_cutoff=0.25,
+        radius=12.0,
+    )
+    assert [p.patch_id for p in first] == [p.patch_id for p in again]
+    # named after the lowest member, so the name says where the patch is
+    assert {p.patch_id for p in first} == {"p:51", "p:201"}
+
+    # the low-scoring patch keeps its identity even though it outranks nothing
+    by_id = {p.patch_id: sorted(m.ref_index for m in p.members) for p in first}
+    assert by_id["p:51"] == [50, 51, 52]
+
+
+def test_changing_one_patch_leaves_the_others_identified_the_same():
+    base = [residue(i, (i * 3.0, 0.0, 0.0)) for i in range(3)]
+    far = [residue(60 + i, (100.0 + i * 3.0, 0.0, 0.0)) for i in range(3)]
+    before, _ = find_patches(base + far, discrimination_cutoff=0.25, radius=12.0)
+
+    extra = residue(63, (109.0, 0.0, 0.0))
+    after, _ = find_patches(base + far + [extra], discrimination_cutoff=0.25, radius=12.0)
+
+    before_ids = {p.patch_id: membership_hash(p.members) for p in before}
+    after_ids = {p.patch_id: membership_hash(p.members) for p in after}
+    assert set(before_ids) == set(after_ids)  # both patches keep their names
+    # the changed patch's membership digest moves; the untouched one does not
+    assert after_ids["p:61"] != before_ids["p:61"]
+    assert after_ids["p:1"] == before_ids["p:1"]
+
+
+def test_membership_hash_ignores_ordering():
+    a = [residue(i, (i * 3.0, 0.0, 0.0)) for i in range(3)]
+    assert membership_hash(a) == membership_hash(list(reversed(a)))
+    assert membership_hash(a) != membership_hash(a[:2])
+
+
+def _group(start_index, origin, n=3, spacing=3.0):  # noqa: D401
+    return [
+        residue(start_index + i, (origin[0] + i * spacing, origin[1], origin[2]))
+        for i in range(n)
+    ]
+
+
+def test_merging_grows_by_diameter_not_by_chaining():
+    """Regression test 3: 15 A, 15 A and 60 A apart is two surfaces, not one."""
+    a = _group(0, (0.0, 0.0, 0.0))
+    b = _group(20, (21.0, 0.0, 0.0))     # ~15 A from a's nearest member
+    c = _group(40, (42.0, 0.0, 0.0))     # ~15 A from b, but 42 A from a
+    far = _group(60, (150.0, 0.0, 0.0))  # 60+ A from everything
+
+    patches, singles = find_patches(
+        a + b + c + far, discrimination_cutoff=0.25, radius=12.0
+    )
+    assert len(patches) == 4
+
+    surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
+    assert surfaces, "neighbouring patches should still group"
+    # nothing may span the whole chain: single linkage would have merged a-b-c
+    for surface in surfaces:
+        assert float(surface["spread_A"]) <= 30.0
+        assert surface["verdict"] == "plausible single epitope"
+    # and the isolated group is never pulled in
+    assert all("p:61" not in surface["patches"] for surface in surfaces)
+    # alternative overlapping groupings are offered, not one verdict
+    assert len(surfaces) >= 2
+
+
+def test_merged_area_is_the_union_not_a_sum():
+    a = _group(0, (0.0, 0.0, 0.0), n=2)
+    b = _group(20, (18.0, 0.0, 0.0), n=2)  # 15 A gap: separate patches, one surface
+    for r in a + b:
+        r.sasa = 100.0
+    patches, singles = find_patches(a + b, discrimination_cutoff=0.25, radius=12.0)
+    surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
+    assert surfaces[0]["n_residues"] == 4
+    assert surfaces[0]["accessible_area_A2"] == pytest.approx(400.0)
+
+
+def test_a_merge_that_would_breach_the_footprint_is_refused():
+    a = _group(0, (0.0, 0.0, 0.0), n=2)
+    # 25 A apart, so they are neighbours, but a 31 A union breaches the footprint
+    b = _group(20, (28.0, 0.0, 0.0), n=2)
+    patches, singles = find_patches(a + b, discrimination_cutoff=0.25, radius=12.0)
+    surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
+    assert not surfaces
+
+
+def test_a_wholly_glycan_proximal_patch_is_discounted_and_labelled():
+    """P2-7: that patch is a glycan hypothesis, not a surface hypothesis."""
+    from epitope_map.patches import GLYCAN_PENALTY, apply_confidence_penalties
+
+    members = _group(0, (0.0, 0.0, 0.0))
+    for r in members:
+        r.glycan_flags.append("within 12 A of a differential sequon")
+    clean = _group(60, (200.0, 0.0, 0.0))
+
+    patches, _ = find_patches(members + clean, discrimination_cutoff=0.25, radius=12.0)
+    apply_confidence_penalties(patches, oligomer_unmodelled=False)
+
+    glycan_patch = next(p for p in patches if p.members[0].ref_index == 0)
+    surface_patch = next(p for p in patches if p.members[0].ref_index == 60)
+    assert glycan_patch.confidence_penalty == GLYCAN_PENALTY
+    assert glycan_patch.total_score < glycan_patch.raw_total_score
+    assert any("glycan hypothesis" in flag for flag in glycan_patch.flags)
+    assert surface_patch.confidence_penalty == 1.0
+    assert surface_patch.total_score == surface_patch.raw_total_score
+
+
+def test_a_patch_on_an_unmodelled_interface_is_discounted():
+    from epitope_map.patches import OLIGOMER_PENALTY, apply_confidence_penalties
+
+    members = _group(700, (0.0, 0.0, 0.0))
+    patches, _ = find_patches(members, discrimination_cutoff=0.25, radius=12.0)
+    apply_confidence_penalties(
+        patches, oligomer_unmodelled=True, interface_regions=[(690, 720)]
+    )
+    assert patches[0].confidence_penalty == OLIGOMER_PENALTY
+    assert any("oligomerisation" in flag for flag in patches[0].flags)
+
+    # supplying the assembly removes the discount
+    patches, _ = find_patches(members, discrimination_cutoff=0.25, radius=12.0)
+    apply_confidence_penalties(
+        patches, oligomer_unmodelled=False, interface_regions=[(690, 720)]
+    )
+    assert patches[0].confidence_penalty == 1.0
+
+
+def test_penalties_change_the_ranking_not_just_the_prose():
+    from epitope_map.patches import _rank, apply_confidence_penalties
+
+    strong = _group(0, (0.0, 0.0, 0.0), n=4)
+    for r in strong:
+        r.composite = 0.6
+        r.glycan_flags.append("near a sequon")
+    weaker = _group(60, (200.0, 0.0, 0.0), n=4)
+    for r in weaker:
+        r.composite = 0.45
+
+    patches, _ = find_patches(strong + weaker, discrimination_cutoff=0.25, radius=12.0)
+    assert patches[0].members[0].ref_index == 0  # the glycan patch leads on raw score
+
+    apply_confidence_penalties(patches, oligomer_unmodelled=False)
+    _rank(patches)
+    assert patches[0].members[0].ref_index == 60  # and loses it once discounted

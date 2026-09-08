@@ -32,12 +32,20 @@ DEFAULT_DISCRIMINATION_CUTOFF = 0.25
 #: how long the indel is and whether it falls in a loop.
 GAP_DIFFERENCE = 0.9
 
-#: An indel of this length or more is treated as a full-strength signal.
-INDEL_SATURATION = 3
+#: An indel of this length or more is treated as a full-strength signal. A
+#: single-residue insertion in a surface loop is still a real insertion, so the
+#: length term starts high rather than at 1/3.
+INDEL_SATURATION = 2
 
 #: Indels inside a helix or strand are usually alignment artifacts rather than
-#: real insertions, so they are damped by this factor.
-INDEL_IN_ELEMENT_FACTOR = 0.5
+#: real insertions, so they are damped by this factor. This is the *only* thing
+#: that damps an indel's discrimination: penalising length as well drove a real
+#: rodent-specific surface insertion from 0.76 to 0.25, which is not a better
+#: answer than the flat 0.9 it replaced.
+INDEL_IN_ELEMENT_FACTOR = 0.4
+
+#: Structure codes that mean "inside a secondary-structure element".
+SS_ELEMENTS = ("H", "G", "I", "E", "B")
 
 
 @dataclass
@@ -519,16 +527,52 @@ def confidence_weight(plddt: float, low: float = 50.0, high: float = 70.0, floor
 
 
 def indel_weight(length: int, secondary_structure: str) -> float:
-    """How much to believe an indel, from its length and where it sits.
+    """How much to discount an indel column's *sequence* signal.
 
-    A one-residue gap in the middle of a helix is usually the aligner's guess; a
-    three-residue insertion in a surface loop genuinely reshapes the surface. The
-    flat treatment gave both the same weight, which put alignment artifacts and
-    real loop insertions side by side in the rankings.
+    Only the structural-artifact case is discounted: a gap inside a helix or
+    strand is usually the aligner's guess. Length is deliberately not penalised
+    here - it belongs in :func:`indel_score`, where it is one geometric factor
+    among several rather than a blanket multiplier on the sequence score.
+    """
+    in_element = str(secondary_structure).upper() in SS_ELEMENTS
+    return INDEL_IN_ELEMENT_FACTOR if in_element else 1.0
+
+
+def indel_score(
+    length: int,
+    secondary_structure: str,
+    rsa: float,
+    flank_rsa: float = float("nan"),
+    distance_to_patch: float = float("inf"),
+    footprint: float = 30.0,
+) -> float:
+    """How much an indel is likely to reshape the surface, in ``[0, 1]``.
+
+    Indels have no natural value on a substitution-chemistry scale - Grantham
+    says nothing about a missing residue - so they get their own measure, built
+    from the things that actually matter for a loop: how long it is, whether it
+    sits in a loop or inside an element (where it is more likely an alignment
+    artifact), how exposed it and its flanks are, and whether it lies near a
+    candidate surface. Reported as its own column so it is inspectable rather
+    than folded invisibly into the discrimination score.
     """
     length_factor = min(1.0, max(1, int(length)) / INDEL_SATURATION)
-    in_element = str(secondary_structure).upper() in ("H", "G", "I", "E", "B")
-    return length_factor * (INDEL_IN_ELEMENT_FACTOR if in_element else 1.0)
+    in_element = str(secondary_structure).upper() in SS_ELEMENTS
+    structure_factor = INDEL_IN_ELEMENT_FACTOR if in_element else 1.0
+
+    exposures = [v for v in (rsa, flank_rsa) if v == v]
+    exposure = (
+        exposure_weight(sum(exposures) / len(exposures)) if exposures else 0.5
+    )
+
+    if distance_to_patch != distance_to_patch or distance_to_patch == float("inf"):
+        proximity = 0.7
+    elif distance_to_patch <= footprint:
+        proximity = 1.0
+    else:
+        proximity = max(0.5, 1.0 - (distance_to_patch - footprint) / (3 * footprint))
+
+    return length_factor * structure_factor * exposure * proximity
 
 
 def composite_score(discrimination: float, rsa: float, plddt: float) -> Tuple[float, float, float]:
@@ -560,6 +604,7 @@ class ResidueAnalysis:
     conserved_in_binders: bool = False
     involves_gap: bool = False
     indel_length: int = 0
+    indel_score: float = float("nan")
     has_missing: bool = False
 
     # structure
@@ -578,11 +623,14 @@ class ResidueAnalysis:
     # topology and annotation
     topology: str = "unknown"
     domain: str = ""
+    domain_source: str = ""
+    uniprot_region: str = ""
     accessible: bool = True
     in_disordered_region: bool = False
     alignment_confidence: float = float("nan")
     local_identity: float = float("nan")
     low_identity_window: bool = False
+    identity_window: str = ""
 
     # flags
     buried: bool = False

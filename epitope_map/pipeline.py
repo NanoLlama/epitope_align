@@ -9,13 +9,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from . import __version__
 from .align import (
     CONFIDENCE_CUTOFF,
-    LOW_IDENTITY_MARGIN,
     Alignment,
+    IdentityWindow,
     ResidueMap,
     align_sequences,
     alignment_confidence,
     local_identity,
+    low_identity_windows,
 )
+from .domains import StructuralDomain, decompose
 from .equivalence import (
     StructuralEquivalence,
     load_species_structures,
@@ -26,8 +28,10 @@ from .io_seq import Dataset, InputError, build_dataset, load_binding_calls, load
 from .patches import (
     DEFAULT_MIN_PATCH_SIZE,
     DEFAULT_PATCH_RADIUS,
+    FOOTPRINT_DIAMETER,
     DEFAULT_RADIUS_SWEEP,
     Patch,
+    apply_confidence_penalties,
     baseline_counts,
     find_patches,
     merged_surfaces,
@@ -36,6 +40,7 @@ from .patches import (
 )
 from .score import (
     DEFAULT_DISCRIMINATION_CUTOFF,
+    indel_score as compute_indel_score,
     indel_weight,
     panel_advice,
     ColumnScore,
@@ -45,13 +50,14 @@ from .score import (
     composite_score,
     score_alignment,
 )
-from .structure import StructureError, StructureModel, load_structure
+from .structure import StructureError, StructureModel, distance, load_structure
 from .topology import (
     AssemblyEvidence,
     Segment,
     Topology,
     assembly_evidence,
     assembly_warnings,
+    interface_regions,
     domain_at,
     load_domains_tsv,
     parse_topology_spec,
@@ -92,6 +98,7 @@ class RunConfig:
     patch_radius: float = DEFAULT_PATCH_RADIUS
     min_patch_size: int = DEFAULT_MIN_PATCH_SIZE
     glycan_radius: float = DEFAULT_GLYCAN_RADIUS
+    footprint_diameter: float = FOOTPRINT_DIAMETER
     cluster_method: str = "graph"
     aligner: str = "auto"
     threads: int = 1
@@ -134,6 +141,9 @@ class RunResult:
     counts: Dict[str, int]
     topology: Topology = field(default_factory=Topology)
     domain_segments: List[Segment] = field(default_factory=list)
+    structural_domains: List[StructuralDomain] = field(default_factory=list)
+    domain_source: str = "none"
+    identity_windows: List[IdentityWindow] = field(default_factory=list)
     radius_sensitivity: List[Dict[str, object]] = field(default_factory=list)
     merged_surfaces: List[Dict[str, object]] = field(default_factory=list)
     promoted_singletons: List[Patch] = field(default_factory=list)
@@ -156,7 +166,9 @@ def build_residue_table(
     structure: StructureModel,
     config: RunConfig,
     topology: Optional[Topology] = None,
-    domains: Optional[Sequence[Segment]] = None,
+    regions: Optional[Sequence[Segment]] = None,
+    domains: Optional[Sequence[StructuralDomain]] = None,
+    domain_source: str = "none",
 ) -> List[ResidueAnalysis]:
     """Fuse sequence scores with structural values into one row per residue.
 
@@ -165,7 +177,11 @@ def build_residue_table(
     as evidence.
     """
     topology = topology or Topology()
-    domains = list(domains or [])
+    regions = list(regions or [])
+    domain_of: Dict[int, str] = {}
+    for domain in domains or []:
+        for ref_index in domain.ref_indices:
+            domain_of[ref_index] = domain.name
     by_key = structure.by_key()
     rows: List[ResidueAnalysis] = []
     for position, score in zip(residue_map.positions(), column_scores):
@@ -190,8 +206,12 @@ def build_residue_table(
         )
         sequence_position = position.ref_index + 1
         row.topology = topology.kind_at(sequence_position)
-        domain = domain_at(domains, sequence_position)
-        row.domain = domain.description if domain else ""
+        # structural domain: the thing you could actually swap
+        row.domain = domain_of.get(position.ref_index, "")
+        row.domain_source = domain_source if row.domain else ""
+        # UniProt regions are functional annotation, kept for context only
+        region = domain_at(regions, sequence_position)
+        row.uniprot_region = region.description if region else ""
         row.accessible = position.in_ectodomain and topology.is_accessible(
             sequence_position
         )
@@ -205,14 +225,15 @@ def build_residue_table(
         row.buried = not (row.rsa == row.rsa and row.rsa >= config.rsa_cutoff)
 
         if row.involves_gap:
-            # believe a long loop insertion; discount a one-residue gap inside a
-            # helix, which is usually the aligner's guess rather than biology
+            # only the artifact case discounts the sequence signal; how much the
+            # indel matters geometrically is a separate, inspectable number
             weight = indel_weight(row.indel_length, row.secondary_structure)
             row.discrimination *= weight
             if weight < 1.0:
                 row.notes.append(
-                    f"indel of {row.indel_length} residue(s) down-weighted "
-                    f"x{weight:.2f} (short, or inside a secondary-structure element)"
+                    f"indel inside a {row.secondary_structure} element - more "
+                    f"likely an alignment artifact than an insertion, so its "
+                    f"sequence signal is damped x{weight:.2f}"
                 )
 
         if not row.accessible:
@@ -251,21 +272,24 @@ def build_residue_table(
 def _apply_alignment_reliability(
     rows: Sequence[ResidueAnalysis],
     confidence: Dict[int, float],
-    identity_windows: Dict[int, float],
+    identity: Dict[int, float],
+    windows: Sequence[IdentityWindow],
+    residue_map: Optional[ResidueMap] = None,
 ) -> None:
-    """Attach per-residue alignment reliability and flag the shaky windows."""
-    values = [v for v in identity_windows.values() if v == v]
-    average = sum(values) / len(values) if values else 0.0
+    """Attach alignment reliability, flagged by region rather than by residue."""
     for row in rows:
         row.alignment_confidence = confidence.get(row.ref_index, float("nan"))
-        row.local_identity = identity_windows.get(row.ref_index, float("nan"))
-        if row.local_identity == row.local_identity and (
-            row.local_identity < average - LOW_IDENTITY_MARGIN
-        ):
+        row.local_identity = identity.get(row.ref_index, float("nan"))
+
+        window = next((w for w in windows if w.contains(row.ref_index)), None)
+        if window is not None:
             row.low_identity_window = True
+            row.identity_window = window.label(residue_map)
             row.notes.append(
-                f"local identity {row.local_identity:.0f}% against a chain average "
-                f"of {average:.0f}%: the aligner has little to go on here"
+                f"inside a low-identity window ({row.identity_window}): the "
+                "aligner has little to go on across this whole stretch, so every "
+                "residue equivalence in it is uncertain, not just the ones that "
+                "happen to fall below a cutoff"
             )
         if row.alignment_confidence == row.alignment_confidence and (
             row.alignment_confidence < CONFIDENCE_CUTOFF
@@ -275,6 +299,46 @@ def _apply_alignment_reliability(
                 "alignment methods disagree about which residue of the other "
                 "species corresponds to this one"
             )
+
+
+def _rerank_after_penalties(patches: List[Patch]) -> None:
+    """Re-sort once penalties have changed the scores they were ranked on."""
+    from .patches import _rank
+
+    if patches:
+        _rank(patches)
+
+
+def _score_indels(
+    rows: Sequence[ResidueAnalysis],
+    patches: Sequence[Patch],
+    footprint: float = FOOTPRINT_DIAMETER,
+) -> None:
+    """Give every indel column its geometric score, once patches are known."""
+    by_index = {row.ref_index: row for row in rows}
+    patch_points = [
+        m.centroid for patch in patches for m in patch.members if m.centroid
+    ]
+    for row in rows:
+        if not row.involves_gap:
+            continue
+        flanks = [
+            by_index[row.ref_index + offset].rsa
+            for offset in (-2, -1, 1, 2)
+            if row.ref_index + offset in by_index
+        ]
+        flanks = [v for v in flanks if v == v]
+        nearest = float("inf")
+        if row.centroid is not None and patch_points:
+            nearest = min(distance(row.centroid, point) for point in patch_points)
+        row.indel_score = compute_indel_score(
+            row.indel_length,
+            row.secondary_structure,
+            row.rsa,
+            sum(flanks) / len(flanks) if flanks else float("nan"),
+            nearest,
+            footprint=footprint,
+        )
 
 
 def _apply_glycan_flags(rows: Sequence[ResidueAnalysis], glycans: GlycanAnalysis) -> None:
@@ -354,9 +418,39 @@ def resolve_topology(
     else:
         topology = derived  # unknown; --ectodomain in structure numbering may still cover us
 
-    if config.domains:
-        domains = load_domains_tsv(Path(config.domains))
     return topology, domains
+
+
+def resolve_domains(
+    config: RunConfig, structure: StructureModel, residue_map: ResidueMap
+) -> Tuple[List[StructuralDomain], str]:
+    """Structural domains for the swap tier, and where they came from.
+
+    A user-supplied table wins; otherwise the model's own contact graph is
+    decomposed. UniProt's feature table is deliberately not used here - its
+    entries are motifs and functional regions, and swapping one of those does
+    not swap the surface a patch sits on.
+    """
+    if config.domains:
+        segments = load_domains_tsv(Path(config.domains))
+        domains = [
+            StructuralDomain(
+                name=segment.description or f"D{number}",
+                ref_indices=[
+                    index
+                    for index in range(len(residue_map))
+                    if segment.start <= index + 1 <= segment.end
+                ],
+                source="user table",
+            )
+            for number, segment in enumerate(segments, start=1)
+        ]
+        return [d for d in domains if d.ref_indices], "user table (--domains)"
+
+    domains = decompose(structure, residue_map.ref_index_of_key)
+    if len(domains) <= 1:
+        return domains, "contact graph (one compact unit; no split found)"
+    return domains, "contact graph of the model"
 
 
 def run_pipeline(config: RunConfig) -> RunResult:
@@ -399,13 +493,27 @@ def run_pipeline(config: RunConfig) -> RunResult:
     confidence, confidence_notes = alignment_confidence(
         alignment, list(dataset.records), threads=config.threads
     )
-    identity_windows = local_identity(alignment)
+    identity = local_identity(alignment)
+    identity_windows = low_identity_windows(identity)
+
+    structural_domains, domain_source = resolve_domains(
+        config, structure, residue_map
+    )
 
     column_scores = score_alignment(residue_map, dataset)
     rows = build_residue_table(
-        residue_map, column_scores, structure, config, topology, domain_segments
+        residue_map,
+        column_scores,
+        structure,
+        config,
+        topology,
+        domain_segments,
+        structural_domains,
+        domain_source,
     )
-    _apply_alignment_reliability(rows, confidence, identity_windows)
+    _apply_alignment_reliability(
+        rows, confidence, identity, identity_windows, residue_map
+    )
     accessible = {row.ref_index for row in rows if row.accessible}
 
     glycans = analyse_glycosylation(
@@ -427,6 +535,18 @@ def run_pipeline(config: RunConfig) -> RunResult:
         dataset,
         cutoff=config.discrimination_cutoff,
     )
+    reference_record = dataset.get(reference)
+    evidence = (
+        assembly_evidence(reference_record.features)
+        if reference_record.features
+        else AssemblyEvidence()
+    )
+    assembly_notes = assembly_warnings(
+        evidence,
+        is_alphafold=structure.is_alphafold,
+        context_supplied=bool(config.context_chains or config.assembly_context),
+    )
+
     patches, singletons = find_patches(
         rows,
         discrimination_cutoff=config.discrimination_cutoff,
@@ -435,8 +555,20 @@ def run_pipeline(config: RunConfig) -> RunResult:
         method=config.cluster_method,
         rsa_cutoff=config.rsa_cutoff,
     )
+    apply_confidence_penalties(
+        patches,
+        oligomer_unmodelled=(
+            evidence.oligomeric
+            and not (config.context_chains or config.assembly_context)
+        ),
+        interface_regions=interface_regions(domain_segments),
+    )
+    _rerank_after_penalties(patches)
+    _score_indels(rows, patches, footprint=config.footprint_diameter)
     promoted, singletons = promote_singletons(singletons, patches)
-    surfaces = merged_surfaces(patches, promoted)
+    surfaces = merged_surfaces(
+        patches, promoted, footprint_diameter=config.footprint_diameter
+    )
     sweep: List[Dict[str, object]] = []
     if config.radius_sweep:
         radii = (
@@ -486,18 +618,6 @@ def run_pipeline(config: RunConfig) -> RunResult:
             "non-binder; pass --species-structure human=AF-P02786-F1"
         )
 
-    reference_record = dataset.get(reference)
-    evidence = (
-        assembly_evidence(reference_record.features)
-        if reference_record.features
-        else AssemblyEvidence()
-    )
-    assembly_notes = assembly_warnings(
-        evidence,
-        is_alphafold=structure.is_alphafold,
-        context_supplied=bool(config.context_chains or config.assembly_context),
-    )
-
     advice = panel_advice(
         residue_map, dataset, cutoff=config.discrimination_cutoff, accessible=accessible
     )
@@ -536,18 +656,13 @@ def run_pipeline(config: RunConfig) -> RunResult:
             "the cytoplasmic tail"
         ]
 
-    unreliable = [
-        r for r in rows
-        if r.accessible
-        and r.alignment_confidence == r.alignment_confidence
-        and r.alignment_confidence < CONFIDENCE_CUTOFF
-    ]
-    if unreliable:
+    if identity_windows:
         confidence_notes.append(
-            f"{len(unreliable)} accessible position(s) have alignment confidence "
-            f"below {CONFIDENCE_CUTOFF}. Point mutants there name a residue "
-            "equivalence the aligner guessed, so they are marked unverified; "
-            "chimera-level suggestions for the same region still stand"
+            f"{len(identity_windows)} low-identity window(s) where residue "
+            "equivalences are uncertain across the whole stretch: "
+            + "; ".join(w.label(residue_map) for w in identity_windows[:6])
+            + ". Point mutants inside them are marked unverified; chimera-level "
+            "suggestions for the same regions still stand"
         )
 
     warnings_ = (
@@ -586,6 +701,9 @@ def run_pipeline(config: RunConfig) -> RunResult:
         counts=counts,
         topology=topology,
         domain_segments=domain_segments,
+        structural_domains=structural_domains,
+        domain_source=domain_source,
+        identity_windows=list(identity_windows),
         radius_sensitivity=sweep,
         merged_surfaces=surfaces,
         promoted_singletons=promoted,

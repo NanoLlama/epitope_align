@@ -15,6 +15,7 @@ from .patches import (
     TYPICAL_EPITOPE_RESIDUES,
     Patch,
 )
+from .domains import describe
 from .pipeline import RunResult
 from .score import MIN_SPECIES_FOR_ENRICHMENT, MISSING
 
@@ -87,7 +88,9 @@ def residues_dataframe(result: RunResult) -> pd.DataFrame:
         row.update(
             {
                 "topology": residue.topology,
-                "domain": residue.domain,
+                "domain": f"dom:{residue.domain}" if residue.domain else "",
+                "domain_source": residue.domain_source,
+                "uniprot_region": residue.uniprot_region,
                 "accessible": residue.accessible,
                 "discrimination": round(residue.discrimination, 4),
                 "pattern_consistency": round(residue.pattern_consistency, 4),
@@ -209,9 +212,22 @@ def region_rows(result: RunResult) -> List[Dict[str, object]]:
     This is the table that says so.
     """
     regions: List[Tuple[str, str, range]] = []
+    for domain in result.structural_domains:
+        for start, end in domain.ranges():
+            regions.append(
+                (
+                    f"dom:{domain.name} ({describe(domain, result.residue_map)})",
+                    "structural domain",
+                    range(start + 1, end + 2),
+                )
+            )
     for segment in result.domain_segments:
         regions.append(
-            (segment.description or "domain", "domain", range(segment.start, segment.end + 1))
+            (
+                f"{segment.description or 'region'} (UniProt)",
+                "annotation",
+                range(segment.start, segment.end + 1),
+            )
         )
     for segment in result.topology.segments:
         regions.append((segment.label, "topology", range(segment.start, segment.end + 1)))
@@ -312,6 +328,7 @@ def write_chimeras(result: RunResult, path: Path) -> Path:
                     "constructible": chimera.constructible,
                     "problems": " | ".join(chimera.problems),
                     "domain_swap": chimera.domain_swap,
+                    "domain_swap_reason": chimera.domain_swap_reason,
                     "patch_total_swapped_residues": chimera.length,
                     "other_patches_included": ",".join(chimera.other_patches_included),
                     "discriminating_positions_inside": chimera.n_discriminating_included,
@@ -548,7 +565,7 @@ def _binding_table(result: RunResult) -> str:
 def _counts_table(result: RunResult) -> str:
     labels = {
         "all_reference_residues": "all reference residues",
-        "in_ectodomain": "within the analysed range",
+        "reachable": "reachable by an antibody (topology and range applied)",
         "discriminating": f"discriminating (score >= {result.config.discrimination_cutoff})",
         "discriminating_and_exposed": f"and exposed (RSA >= {result.config.rsa_cutoff})",
         "after_context_masking": "and not masked by context/glycan/ectodomain filters",
@@ -603,8 +620,11 @@ def _patch_section(result: RunResult) -> str:
             f"({len(chimera.segments)} segment(s), {chimera.length} residues total; "
             f"{chimera.note})"
             + (
-                f"\n- Whole-domain alternative: swap `{chimera.domain_swap}`"
+                f"\n- Whole-domain alternative: swap `{chimera.domain_swap}`, "
+                "which contains every member of this patch"
                 if chimera.domain_swap
+                else f"\n- No whole-domain alternative: {chimera.domain_swap_reason}"
+                if chimera.domain_swap_reason
                 else ""
             )
             + (
@@ -692,6 +712,13 @@ def _regions_section(result: RunResult) -> str:
             f"{row['percent_discriminating_and_exposed']}% | {row['mean_plddt']} | "
             f"{row['percent_reachable']}% |"
         )
+    lines.append("")
+    lines.append(
+        f"Structural domains come from: {result.domain_source}. UniProt regions "
+        "are shown as annotation only - they are motifs and functional regions, "
+        "not the architecture you would swap, so they are never used for "
+        "domain-level recommendations."
+    )
     lines.append("")
     lines.append(
         "A region well above the rest of the chain is either the answer or an "
