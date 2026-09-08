@@ -118,6 +118,7 @@ reference must be a binder - numbering and structure are anchored to it.
 | `chimeras.tsv` | suggested domain-swap segments, one row per segment, with a constructibility verdict |
 | `mutants.tsv` | reciprocal point mutants, both directions, each numbered in its own background, marked where the residue equivalence behind them is not reliable |
 | `radius_sensitivity.tsv` | which patches merge at which clustering radius (with `--radius-sweep`) |
+| `patch_id_map.tsv` | previous run's patch IDs mapped onto this run's (with `--compare-run`) |
 | `divergence.svg` | discrimination along the chain with domains, disordered regions and top patches marked |
 | `report.md` | run parameters, alignment stats, how much signal there is, the narrowing table, top patches, glycosylation, next experiments, warnings, caveats |
 | `session.pml` | PyMOL session: composite score painted white to red, top patches coloured, view set |
@@ -155,15 +156,47 @@ reference must be a binder - numbering and structure are anchored to it.
    ungapped sequence. Sequons that cleanly separate binders from non-binders are
    reported, and every surface residue within `--glycan-radius` of the sequon
    asparagine is flagged, because a glycan occludes at a distance.
-8. **Patches** (`patches.py`) - a graph over exposed discriminating residues with
+8. **Domains** (`domains.py`) - spectral bisection of the C-alpha contact graph
+   finds compact, densely self-contacting units, including discontinuous ones,
+   and declines to split a single globular domain. Used for whole-domain swap
+   recommendations; UniProt regions are kept as annotation only.
+9. **Patches** (`patches.py`) - a graph over exposed discriminating residues with
    a 12 A cutoff (connected components, or DBSCAN with `--cluster-method dbscan`,
    which will not chain two surfaces together through one bridging residue).
    Patches are ranked raw and normalized, flagged against the 15-22 residue,
    600-900 A^2 envelope of a real conformational epitope.
-9. **Experiments** (`suggest.py`) - domain-swap segments that isolate each patch,
+10. **Experiments** (`suggest.py`) - domain-swap segments that isolate each patch,
    checked for constructibility, with a whole-domain alternative where the patch
    sits in one annotated domain; and reciprocal mutants with the gain-of-binding
    direction prioritised, since loss of binding alone can be generic misfolding.
+
+### What the second real run changed
+
+The v0.2.0 run on the same target kept its defensible top hit, but three things
+were still wrong enough to mislead:
+
+- **A domain swap that did not contain its patch.** The recommended construct
+  held one of a patch's six residues, and it was being offered as the fallback
+  whenever the segment list was declared impractical - so the tool's own advice
+  pointed at the experiment guaranteed not to test its hypothesis. Domain swaps
+  now require full containment, and structural domains come from a contact-graph
+  decomposition (`domains.py`) rather than from UniProt's motif annotations,
+  which are not the architecture anyone would swap.
+- **Patch IDs assigned by rank.** Letters were reassigned between versions on
+  identical input, so "patch PD" in a notebook silently meant different residues
+  after a re-run. IDs are now derived from content (`p:202`), with a membership
+  digest and `--compare-run` to map a previous run's IDs onto the current ones.
+- **Merged surfaces that always collapsed to everything.** A transitive closure
+  at any link distance groups the whole protein on a real target. Groups now
+  grow by diameter and refuse the merge that would breach a footprint.
+
+Also this round: alignment confidence is withheld unless three genuinely
+different aligners ran (agreement between two settings of one program is not
+evidence); ambiguity is flagged by window rather than per residue; indels get
+their own geometric `indel_score` instead of being crushed by a length penalty;
+the oligomer and glycan findings discount the patches they apply to instead of
+only appearing in prose; and the species advisor ranks by expected value over
+both binding outcomes, with real candidate orthologs listed above hypotheticals.
 
 ### What the first real run changed
 
@@ -206,6 +239,10 @@ target. Everything below exists because of that run:
 | `--keep-disordered` | off | long low-pLDDT regions do not seed patches |
 | `--radius-sweep` | off | e.g. `10,12,14,16,18` |
 | `--equivalence` | `sequence` | `structural` with `--species-structure` |
+| `--footprint-diameter` | 30 A | how wide a merged surface may grow |
+| `--domains` | contact graph | TSV of structural domains to use instead |
+| `--candidate-species` | none | orthologs to score for the panel advice |
+| `--compare-run` | none | previous outdir, for `patch_id_map.tsv` |
 | `--ectodomain-numbering` | `structure` | or `sequence` for 1-based reference positions |
 | `--mismatch-tolerance` | 0.05 | sequence/structure disagreement before the run stops |
 

@@ -86,6 +86,8 @@ class RunConfig:
     keep_disordered: bool = False
     equivalence: str = "sequence"
     species_structures: List[str] = field(default_factory=list)
+    candidate_species: List[str] = field(default_factory=list)
+    compare_run: Optional[str] = None
     radius_sweep: List[float] = field(default_factory=list)
     prefer_assembly: bool = True
     chain: Optional[str] = None
@@ -309,6 +311,55 @@ def _rerank_after_penalties(patches: List[Patch]) -> None:
         _rank(patches)
 
 
+def _align_candidates(
+    config: RunConfig,
+    dataset: Dataset,
+    alignment: Alignment,
+    reference: str,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Align candidate orthologs onto the existing alignment's columns.
+
+    They are scored but never included in the run itself: they have no binding
+    data, and the point is to work out what testing them would buy.
+    """
+    if not config.candidate_species:
+        return {}, []
+    notes: List[str] = []
+    try:
+        records = load_sequences(config.candidate_species, cache_dir=config.cache_dir)
+    except InputError as exc:
+        return {}, [f"--candidate-species ignored: {exc}"]
+
+    reference_record = dataset.get(reference)
+    out: Dict[str, str] = {}
+    for record in records:
+        if record.name in alignment.sequences:
+            notes.append(
+                f"candidate {record.name!r} is already in the panel; skipped"
+            )
+            continue
+        merged = align_sequences(
+            [reference_record, record], reference=reference, method="pairwise"
+        )
+        # project onto the existing columns via the reference
+        projected = []
+        index = 0
+        candidate = merged.sequences[record.name]
+        for character in alignment.sequences[reference]:
+            if character == "-":
+                projected.append("-")
+            else:
+                projected.append(candidate[index] if index < len(candidate) else "-")
+                index += 1
+        out[record.name] = "".join(projected)
+    if out:
+        notes.append(
+            f"{len(out)} candidate ortholog(s) scored for the panel advice: "
+            + ", ".join(out)
+        )
+    return out, notes
+
+
 def _score_indels(
     rows: Sequence[ResidueAnalysis],
     patches: Sequence[Patch],
@@ -432,20 +483,25 @@ def resolve_domains(
     not swap the surface a patch sits on.
     """
     if config.domains:
-        segments = load_domains_tsv(Path(config.domains))
-        domains = [
-            StructuralDomain(
-                name=segment.description or f"D{number}",
-                ref_indices=[
-                    index
-                    for index in range(len(residue_map))
-                    if segment.start <= index + 1 <= segment.end
-                ],
-                source="user table",
+        # rows sharing a name are one discontinuous domain, which is what a real
+        # domain often is: TfR1's protease-like domain is 121-188 plus 384-606
+        grouped: Dict[str, List[int]] = {}
+        for number, segment in enumerate(
+            load_domains_tsv(Path(config.domains)), start=1
+        ):
+            name = segment.description or f"D{number}"
+            grouped.setdefault(name, []).extend(
+                index
+                for index in range(len(residue_map))
+                if segment.start <= index + 1 <= segment.end
             )
-            for number, segment in enumerate(segments, start=1)
+        domains = [
+            StructuralDomain(name=name, ref_indices=sorted(set(indices)), source="user table")
+            for name, indices in grouped.items()
+            if indices
         ]
-        return [d for d in domains if d.ref_indices], "user table (--domains)"
+        domains.sort(key=lambda d: min(d.ref_indices))
+        return domains, "user table (--domains)"
 
     domains = decompose(structure, residue_map.ref_index_of_key)
     if len(domains) <= 1:
@@ -618,8 +674,15 @@ def run_pipeline(config: RunConfig) -> RunResult:
             "non-binder; pass --species-structure human=AF-P02786-F1"
         )
 
+    candidate_alignments, candidate_notes = _align_candidates(
+        config, dataset, alignment, reference
+    )
     advice = panel_advice(
-        residue_map, dataset, cutoff=config.discrimination_cutoff, accessible=accessible
+        residue_map,
+        dataset,
+        cutoff=config.discrimination_cutoff,
+        accessible=accessible,
+        candidates=candidate_alignments,
     )
     chimeras = suggest_chimeras(patches, rows, residue_map, structure, top_n=config.top_n)
     mutants = suggest_mutants(
@@ -667,6 +730,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
 
     warnings_ = (
         warnings_topology
+        + candidate_notes
         + assembly_notes
         + equivalence_warnings
         + confidence_notes

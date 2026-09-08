@@ -261,6 +261,16 @@ def load_sequences(
         if "=" in item:
             label, accession = item.split("=", 1)
         accession = accession.strip()
+
+        # an item may itself be a FASTA file, so a list can mix files and
+        # accessions - which is what a candidate-ortholog list tends to look like
+        if Path(accession).exists():
+            parsed = parse_fasta(Path(accession).read_text())
+            if label and len(parsed) == 1:
+                parsed[0].name = label.strip()
+            records.extend(parsed)
+            continue
+
         if not _UNIPROT_RE.match(accession):
             raise InputError(
                 f"{item!r} is neither an existing FASTA path nor a UniProt accession"

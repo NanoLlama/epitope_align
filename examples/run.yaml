@@ -29,3 +29,6 @@ top-n: 5
 
 # re-cluster at several radii to see which patches are really one surface
 radius-sweep: 10,12,14,16,18
+
+# how wide a candidate merged surface may grow before the merge is refused
+footprint-diameter: 30

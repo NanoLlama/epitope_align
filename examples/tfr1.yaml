@@ -47,7 +47,29 @@ top_n: 5
 # the partner here instead:
 # context_chains: B
 
+# Candidate orthologs for the panel advice: a species outside both existing
+# clades resolves far more than another rodent or another primate. Guinea pig
+# and cynomolgus are the two worth pricing here - fill in the accessions and
+# they will be scored and named in the report.
+# candidate_species:
+#   - guinea_pig=REPLACE_ME
+#   - cyno=REPLACE_ME
+
 # With a human TfR1 structure to hand, derive residue equivalences from 3D
 # rather than from the aligner's guess in the 195-235 loop:
 # equivalence: structural
 # species_structure: human=AF-P02786-F1
+
+# 30 A is what a paratope covers; candidate surfaces are grown only while they
+# still fit inside it, instead of chaining across the whole protein.
+footprint_diameter: 30
+
+# Real structural domains. UniProt's feature table gives "PA" (225-315) and
+# "Ligand-binding" (572-763) - motifs, not the architecture you would swap. The
+# real domains are protease-like 121-188 + 384-606, apical 189-383, helical
+# 607-760, none of which the feature table contains. Without this table the
+# contact graph of the model is decomposed instead.
+# domains: examples/tfr1_domains.tsv
+
+# Map this run's patches onto a previous run's IDs:
+# compare_run: results/previous

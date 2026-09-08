@@ -102,7 +102,9 @@ def test_pymol_script_references_the_top_patches(synthetic_result, tmp_path):
     text = paths["pymol"].read_text()
     assert "spectrum b, white_red" in text
     for patch in synthetic_result.patches[: synthetic_result.config.top_n]:
-        assert f"select {patch.patch_id}," in text
+        # ':' is not legal in a PyMOL selection name
+        assert f"select {patch.patch_id.replace(':', '_')}," in text
+        assert f"# {patch.patch_id}" in text
 
 
 def test_ectodomain_range_restricts_the_analysis(synthetic_inputs, tmp_path):
@@ -437,17 +439,26 @@ def test_enrichment_is_withheld_for_a_small_panel(synthetic_inputs, tmp_path):
     assert "too few for the background rate to mean anything" in text
 
 
-def test_panel_advice_names_the_branch_worth_sampling(synthetic_result):
-    """P2-3: 'add species' is advice nobody can act on."""
+def test_panel_advice_ranks_by_expected_value(synthetic_result):
+    """P2-6: you cannot order a species by its binding result."""
     advice = synthetic_result.panel_advice
     assert advice
-    top = advice[0]
-    assert top["reduction"] > 0
-    assert "close relative of" in top["hypothetical_species"]
-    # a species that breaks the clade split beats one that reinforces it
-    binders = {r.name for r in synthetic_result.dataset.binders}
-    assert (top["closest_to"] in binders) == (top["binding"] == "non_binder")
-    assert advice == sorted(advice, key=lambda entry: -entry["reduction"])
+    for entry in advice:
+        assert entry["expected_candidates"] == pytest.approx(
+            0.5 * entry["if_it_binds"] + 0.5 * entry["if_it_does_not_bind"], abs=0.05
+        )
+    assert advice == sorted(
+        advice, key=lambda entry: -float(entry["expected_reduction"])
+    )
+    # an outcome-chosen best case no longer wins on its best outcome alone
+    best = advice[0]
+    extreme = max(
+        advice, key=lambda e: max(
+            e["candidates_now"] - e["if_it_binds"],
+            e["candidates_now"] - e["if_it_does_not_bind"],
+        )
+    )
+    assert best["expected_reduction"] >= extreme["expected_reduction"]
 
 
 def test_chimera_crossing_the_membrane_is_rejected(synthetic_inputs, tmp_path):
@@ -483,3 +494,61 @@ def test_divergence_plot_is_valid_svg(synthetic_result, tmp_path):
     assert path.read_text().count("<circle") == sum(
         p.size for p in synthetic_result.patches[: synthetic_result.config.top_n]
     )
+
+
+def test_a_real_ortholog_outranks_an_outcome_chosen_hypothetical(
+    synthetic_inputs, tmp_path
+):
+    """Regression test 6: you can order a species; you cannot order a hypothesis."""
+    seqs, _ = synthetic.species_sequences(outgroup=True)
+    candidates = tmp_path / "candidates.fasta"
+    candidates.write_text(f">guinea_pig_like\n{seqs['outgroup']}\n")
+
+    result = run_pipeline(
+        _config(
+            synthetic_inputs,
+            tmp_path,
+            topology="whole-chain",
+            candidate_species=[str(candidates)],
+        )
+    )
+    advice = result.panel_advice
+    assert advice
+    assert advice[0]["candidate"] == "guinea_pig_like"
+    assert advice[0]["kind"] == "real ortholog"
+    # the hypotheticals are still shown, labelled as the upper bounds they are
+    hypothetical = [e for e in advice if e["kind"] == "hypothetical"]
+    assert hypothetical
+    assert all("upper bound" in e["note"] for e in hypothetical)
+    assert any("candidate ortholog(s) scored" in w for w in result.warnings)
+
+
+def test_compare_run_maps_previous_patch_ids(synthetic_inputs, tmp_path):
+    """P0-5: which of today's patches was yesterday's note about?"""
+    import csv
+
+    from epitope_map.report import write_all
+
+    first = run_pipeline(_config(synthetic_inputs, tmp_path / "a", topology="whole-chain"))
+    write_all(first, first.config.outdir)
+
+    second = run_pipeline(
+        _config(
+            synthetic_inputs,
+            tmp_path / "b",
+            topology="whole-chain",
+            discrimination_cutoff=0.3,
+            compare_run=str(first.config.outdir),
+        )
+    )
+    paths = write_all(second, second.config.outdir)
+    assert "patch_id_map" in paths
+
+    with open(paths["patch_id_map"]) as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    assert rows
+    assert {"previous_patch_id", "current_patch_id", "jaccard_overlap"} <= set(rows[0])
+    # the top patch survives a small cutoff change and is matched to itself
+    top = first.patches[0].patch_id
+    match = next(r for r in rows if r["previous_patch_id"] == top)
+    assert float(match["jaccard_overlap"]) > 0.5

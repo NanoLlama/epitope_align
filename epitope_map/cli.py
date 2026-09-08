@@ -125,6 +125,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SPECIES=STRUCTURE",
         help="structure of another species, e.g. 'human=AF-P02786-F1'. Repeatable",
     )
+    parser.add_argument(
+        "--candidate-species",
+        action="append",
+        default=[],
+        metavar="LABEL=ACCESSION",
+        help="candidate ortholog to evaluate for the panel advice, e.g. "
+        "'guinea_pig=P00000'. Repeatable; scored but not included in the run",
+    )
+    parser.add_argument(
+        "--compare-run",
+        metavar="OUTDIR",
+        help="a previous run's output directory; writes patch_id_map.tsv mapping "
+        "its patch IDs onto this run's by residue overlap",
+    )
     parser.add_argument("--chain", help="chain ID (default: first protein chain)")
     parser.add_argument(
         "--assembly-context",
@@ -278,6 +292,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         ),
         equivalence=str(values.get("equivalence", "sequence")),
         species_structures=_split_list(values.get("species_structure")),
+        candidate_species=_split_list(values.get("candidate_species")),
+        compare_run=str(values["compare_run"]) if values.get("compare_run") else None,
         radius_sweep=[float(r) for r in _split_list(values.get("radius_sweep"))],
         prefer_assembly=(
             str(values["assembly"]).strip().lower().startswith("bio")

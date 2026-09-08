@@ -155,6 +155,7 @@ def reference_sequence(seed: int = 7) -> str:
 def species_sequences(
     include_informative: bool = False,
     disordered_stalk: bool = False,
+    outgroup: bool = False,
 ) -> Tuple[Dict[str, str], Dict[str, str]]:
     """Return ``(sequences, binding_calls)`` for the synthetic panel.
 
@@ -210,6 +211,17 @@ def species_sequences(
                     sequence[index] = _swap(sequence[index], stalk_rng)
             seqs[name] = "".join(sequence)
 
+    if outgroup:
+        # equidistant from both clades: the species that actually breaks a
+        # two-clade split, which no hypothetical relative of the panel can be
+        og_rng = random.Random(31)
+        sequence = list(mouse)
+        for index in NOISE_INDICES[::2]:
+            sequence[index] = seqs["human"][index]
+        for index in EPITOPE_INDICES[::2]:
+            sequence[index] = _swap(sequence[index], og_rng)
+        seqs["outgroup"] = "".join(sequence)
+
     if include_informative:
         vole = list(mouse)
         for index, aa in drastic.items():
@@ -226,6 +238,8 @@ def species_sequences(
     }
     if include_informative:
         calls["vole"] = "non_binder"
+    if outgroup:
+        calls.pop("outgroup", None)  # a candidate has no binding data yet
     return seqs, calls
 
 

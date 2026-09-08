@@ -1,0 +1,8 @@
+# Structural domains of TfR1, in reference (UniProt) numbering.
+# A domain may be discontinuous: list each stretch on its own line under the
+# same name and they are treated as one domain.
+name	start	end
+protease-like	121	188
+apical	189	383
+protease-like	384	606
+helical	607	760

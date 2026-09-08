@@ -201,6 +201,10 @@ to swap between species, and which point mutants to make. Prioritise the
 does not bind. If that restores binding, it is hard to argue with. Loss of
 binding on its own can just mean you broke the protein.
 
+Patch names look like `p:202` — named after their lowest residue, so the same
+name means the same patch when you re-run with different settings. Domains are
+written `dom:D2` so the two can never be confused.
+
 Watch for two labels here. A mutant marked **UNVERIFIED** sits in a stretch
 where the sequence alignment is ambiguous: the region is worth testing but the
 specific residue may be the wrong one, so swap the segment before ordering the
@@ -246,6 +250,10 @@ folder.
 **"the membrane topology of the reference could not be determined"** — this is
 the tool refusing to score the inside of a cell. Give it `--topology` as
 described above, or `--topology whole-chain` for a soluble protein.
+
+**A patch offered no whole-domain swap** — that is deliberate. A domain swap is
+only suggested when the domain contains *every* residue of the patch; otherwise
+you would be building a construct that leaves most of the hypothesis out.
 
 **"reference species ... is marked non_binder"** — the reference has to be a
 species the antibody binds.

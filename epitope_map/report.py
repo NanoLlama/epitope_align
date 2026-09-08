@@ -11,6 +11,7 @@ import pandas as pd
 
 from .patches import (
     EPITOPE_SCALE,
+    membership_hash,
     TYPICAL_EPITOPE_BSA,
     TYPICAL_EPITOPE_RESIDUES,
     Patch,
@@ -64,6 +65,12 @@ def write_all(result: RunResult, outdir: Path) -> Dict[str, Path]:
         paths["radius_sensitivity"] = write_radius_sensitivity(
             result, outdir / "radius_sensitivity.tsv"
         )
+    if result.config.compare_run:
+        mapped = write_patch_id_map(
+            result, Path(result.config.compare_run), outdir / "patch_id_map.tsv"
+        )
+        if mapped is not None:
+            paths["patch_id_map"] = mapped
     return paths
 
 
@@ -98,9 +105,11 @@ def residues_dataframe(result: RunResult) -> pd.DataFrame:
                 "conserved_in_binders": residue.conserved_in_binders,
                 "indel": residue.involves_gap,
                 "indel_length": residue.indel_length,
+                "indel_score": _fmt(residue.indel_score, 3),
                 "alignment_confidence": _fmt(residue.alignment_confidence, 3),
                 "local_identity": _fmt(residue.local_identity, 1),
                 "low_identity_window": residue.low_identity_window,
+                "identity_window": residue.identity_window,
                 "missing_species": residue.has_missing,
                 "sasa": _fmt(residue.sasa, 1),
                 "rsa": _fmt(residue.rsa, 3),
@@ -136,6 +145,7 @@ def patches_dataframe(result: RunResult, patches: Optional[Sequence[Patch]] = No
         rows.append(
             {
                 "patch_id": patch.patch_id,
+                "membership": membership_hash(patch.members),
                 "rank_raw": patch.rank_raw,
                 "rank_normalized": patch.rank_normalized,
                 "n_residues": patch.size,
@@ -152,6 +162,8 @@ def patches_dataframe(result: RunResult, patches: Optional[Sequence[Patch]] = No
                     m.ref_number or str(m.ref_index + 1) for m in patch.members
                 ),
                 "total_score": round(patch.total_score, 4),
+                "raw_total_score": round(patch.raw_total_score, 4),
+                "confidence_penalty": round(patch.confidence_penalty, 3),
                 "mean_score": round(patch.mean_score, 4),
                 "normalized_score": round(patch.normalized_score, 4),
                 "max_grantham": round(patch.max_grantham, 1),
@@ -485,6 +497,11 @@ def write_alignment(result: RunResult, path: Path) -> Path:
 # --------------------------------------------------------------------------
 
 
+def _pymol_name(patch_id: str) -> str:
+    """PyMOL selection names cannot contain ':', so p:202 becomes p_202."""
+    return patch_id.replace(":", "_").replace("-", "_")
+
+
 def _pymol_selection(patch: Patch, chain: str) -> str:
     numbers = "+".join(m.ref_number for m in patch.members if m.ref_number)
     return f"chain {chain} and resi {numbers}"
@@ -525,18 +542,17 @@ def write_pymol(result: RunResult, path: Path) -> Path:
     for index, patch in enumerate(result.patches[: result.config.top_n]):
         color = _PATCH_COLORS[index % len(_PATCH_COLORS)]
         selection = _pymol_selection(patch, chain)
+        name = _pymol_name(patch.patch_id)
         lines += [
-            f"select {patch.patch_id}, {selection}",
-            f"color {color}, {patch.patch_id}",
-            f"show sticks, {patch.patch_id} and not (name C+N+O)",
-            f"set surface_color, {color}, {patch.patch_id}",
+            f"# {patch.patch_id}",
+            f"select {name}, {selection}",
+            f"color {color}, {name}",
+            f"show sticks, {name} and not (name C+N+O)",
+            f"set surface_color, {color}, {name}",
         ]
     if result.patches:
-        lines += [
-            "",
-            f"orient {result.patches[0].patch_id}",
-            f"zoom {result.patches[0].patch_id}, 8",
-        ]
+        first = _pymol_name(result.patches[0].patch_id)
+        lines += ["", f"orient {first}", f"zoom {first}, 8"]
     lines += [
         "deselect",
         "set ray_opaque_background, 0",
@@ -731,6 +747,17 @@ def _regions_section(result: RunResult) -> str:
 
 def _merged_surfaces_section(result: RunResult) -> str:
     if not result.merged_surfaces:
+        neighbours = sum(1 for p in result.patches if p.neighbours)
+        if neighbours:
+            return (
+                f"{neighbours} patch(es) have neighbours within epitope range, but "
+                "no combination of them fits inside a "
+                f"{result.config.footprint_diameter:.0f} A footprint, so no merge "
+                "was made - see the `neighbours` column in `patches.tsv` for the "
+                "pairwise distances. Raising --footprint-diameter would group them, "
+                "but a paratope covering more than ~30 A is not what an antibody "
+                "does.\n"
+            )
         return (
             "No two patches sit close enough to be one antibody footprint, so "
             "each is an independent hypothesis.\n"
@@ -807,20 +834,43 @@ def _equivalence_section(result: RunResult) -> str:
 def _advice_section(result: RunResult) -> str:
     if not result.panel_advice:
         return "No panel advice could be computed.\n"
+    real = any(entry["kind"] == "real ortholog" for entry in result.panel_advice)
     lines = [
-        "Which ortholog to test next, ranked by how much of the candidate list it "
-        "would resolve. The hypothetical relative is modelled as sequence-identical "
-        "to the species it sits beside, so these are **best cases** - read the "
-        "ranking, not the numbers.",
+        "Which ortholog to test next, ranked by the candidates it is **expected** "
+        "to resolve - averaged over both possible binding outcomes, since you "
+        "cannot order a species by its result. A candidate that resolves a lot "
+        "either way beats one that resolves everything on an outcome you have no "
+        "control over.",
         "",
-        "| test next | candidates now | best case after | resolved |",
-        "|---|---|---|---|",
+        "| candidate | kind | now | if it binds | if it does not | expected | resolves |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for entry in result.panel_advice[:6]:
+    for entry in result.panel_advice[:8]:
         lines.append(
-            f"| {entry['hypothetical_species']} | {entry['candidates_now']} | "
-            f"{entry['candidates_after_best_case']} | "
-            f"{float(entry['reduction_fraction']):.0%} |"
+            f"| {entry['candidate']} | {entry['kind']} | {entry['candidates_now']} | "
+            f"{entry['if_it_binds']} | {entry['if_it_does_not_bind']} | "
+            f"{entry['expected_candidates']} | "
+            f"{float(entry['expected_reduction_fraction']):.0%} |"
+        )
+    lines.append("")
+    lines.append(
+        "Real orthologs are listed first: a hypothetical relative is modelled as "
+        "sequence-identical to a species already in the panel, which makes its "
+        "figures an upper bound no real species reaches - and it is not something "
+        "you can order."
+    )
+    lines.append("")
+    for entry in result.panel_advice[:3]:
+        if entry["note"]:
+            lines.append(f"- **{entry['candidate']}**: {entry['note']}")
+    if not real:
+        lines.append("")
+        lines.append(
+            "These are hypothetical relatives of species already in the panel, so "
+            "the tool cannot name the species that would help most - one placed "
+            "*outside* both existing clades. Pass real candidate orthologs with "
+            "`--candidate-species guinea_pig=ACCESSION,cyno=ACCESSION` and they "
+            "will be scored and named here instead."
         )
     return "\n".join(lines)
 
@@ -1133,4 +1183,53 @@ are energetic hot spots. Patches far outside that envelope are flagged in
 - `report.md` - this file
 """
     path.write_text(text)
+    return path
+
+
+def write_patch_id_map(
+    result: RunResult, previous_outdir: Path, path: Path
+) -> Optional[Path]:
+    """Map a previous run's patch IDs onto this one's, by residue overlap.
+
+    Even with content-derived identifiers, a changed cutoff or radius moves
+    membership around; this says which of today's patches yesterday's notes were
+    talking about.
+    """
+    previous_file = Path(previous_outdir) / "patches.tsv"
+    if not previous_file.exists():
+        return None
+    previous = pd.read_csv(previous_file, sep="\t")
+    if "ref_numbers" not in previous.columns:
+        return None
+
+    current = {
+        patch.patch_id: {m.ref_number or str(m.ref_index + 1) for m in patch.members}
+        for patch in result.patches + result.promoted_singletons + result.singletons
+    }
+
+    rows = []
+    for _, row in previous.iterrows():
+        members = {
+            value.strip()
+            for value in str(row.get("ref_numbers", "")).split(",")
+            if value.strip()
+        }
+        if not members:
+            continue
+        best_id, best_overlap = "", 0.0
+        for patch_id, now in current.items():
+            union = members | now
+            overlap = len(members & now) / len(union) if union else 0.0
+            if overlap > best_overlap:
+                best_id, best_overlap = patch_id, overlap
+        rows.append(
+            {
+                "previous_patch_id": row.get("patch_id", ""),
+                "current_patch_id": best_id or "(gone)",
+                "jaccard_overlap": round(best_overlap, 3),
+                "shared_residues": len(members & current.get(best_id, set())),
+                "previous_residues": ",".join(sorted(members)),
+            }
+        )
+    pd.DataFrame(rows).to_csv(path, sep="\t", index=False)
     return path

@@ -695,19 +695,22 @@ def panel_advice(
     dataset: Dataset,
     cutoff: float = DEFAULT_DISCRIMINATION_CUTOFF,
     accessible: Optional[Sequence[int]] = None,
+    candidates: Optional[Dict[str, str]] = None,
+    binder_prior: float = 0.5,
 ) -> List[Dict[str, object]]:
-    """Which additional ortholog would cut the candidate list most?
+    """Which ortholog to test next, ranked by what it is expected to resolve.
 
-    "Add more species" is advice nobody can act on. This asks a concrete
-    question instead: for each species already in the panel, what happens if the
-    next one tested turns out to be a close relative of *that* species carrying
-    the opposite binding outcome? The answer names the branch of the tree worth
-    sampling rather than gesturing at the tree.
+    Two things make this actionable rather than decorative:
 
-    The hypothetical relative is modelled as sequence-identical to the species it
-    sits next to, so every figure here is a **best case** - a real ortholog
-    differs at some positions and resolves fewer. Read the ranking, not the
-    absolute numbers.
+    * **Expected value.** You cannot order a species by its binding result, so
+      ranking "a relative of X that binds" above everything else is advice no one
+      can follow. Each candidate is scored under *both* outcomes and averaged, so
+      a species that resolves 55%/50% correctly beats one that resolves 90%/10%.
+    * **Real sequences where they are offered.** Given candidate ortholog
+      sequences (``--candidate-species``), the candidates are those species,
+      named, rather than hypothetical relatives of the panel you already have.
+      Candidates that sit outside both existing clades - the ones that break the
+      split - score highest, and only a real panel can contain them.
     """
     binders = [r.name for r in dataset.binders]
     non_binders = [r.name for r in dataset.non_binders]
@@ -715,58 +718,145 @@ def panel_advice(
         return []
 
     keep = set(accessible) if accessible is not None else None
-    columns = [
-        {name: residue_map.residue_at(name, ref_index) for name in
-         residue_map.alignment.sequences}
+    positions = [
+        ref_index
         for ref_index in range(len(residue_map))
         if keep is None or ref_index in keep
+    ]
+    columns = [
+        {
+            name: residue_map.residue_at(name, ref_index)
+            for name in residue_map.alignment.sequences
+        }
+        for ref_index in positions
     ]
     if not columns:
         return []
 
-    def count(binder_names: Sequence[str], non_binder_names: Sequence[str]) -> int:
+    def count(
+        extra_name: Optional[str],
+        extra_residues: Optional[Sequence[str]],
+        call: Optional[str],
+    ) -> int:
+        group_b = list(binders)
+        group_n = list(non_binders)
+        if extra_name is not None:
+            (group_b if call == "binder" else group_n).append(extra_name)
         hits = 0
-        for residues in columns:
-            score, _, _, _ = score_column(residues, binder_names, non_binder_names)
+        for index, residues in enumerate(columns):
+            if extra_name is not None:
+                residues = dict(residues)
+                residues[extra_name] = extra_residues[index]
+            score, _, _, _ = score_column(residues, group_b, group_n)
             if score >= cutoff:
                 hits += 1
         return hits
 
-    baseline = count(binders, non_binders)
+    baseline = count(None, None, None)
     advice: List[Dict[str, object]] = []
-    for relative in binders + non_binders:
-        opposite = "non_binder" if relative in binders else "binder"
-        hypothetical = f"{relative}-like-{opposite}"
-        columns_with = []
-        for residues in columns:
-            augmented = dict(residues)
-            augmented[hypothetical] = residues[relative]
-            columns_with.append(augmented)
 
-        new_binders = list(binders)
-        new_non_binders = list(non_binders)
-        (new_non_binders if opposite == "non_binder" else new_binders).append(
-            hypothetical
+    def add(label: str, residues: Sequence[str], kind: str, note: str = "") -> None:
+        as_binder = count("__candidate__", residues, "binder")
+        as_non_binder = count("__candidate__", residues, "non_binder")
+        expected = (
+            binder_prior * as_binder + (1.0 - binder_prior) * as_non_binder
         )
-
-        hits = 0
-        for residues in columns_with:
-            score, _, _, _ = score_column(residues, new_binders, new_non_binders)
-            if score >= cutoff:
-                hits += 1
         advice.append(
             {
-                "hypothetical_species": (
-                    f"a close relative of {relative} that does "
-                    f"{'not bind' if opposite == 'non_binder' else 'bind'}"
-                ),
-                "closest_to": relative,
-                "binding": opposite,
+                "candidate": label,
+                "kind": kind,
                 "candidates_now": baseline,
-                "candidates_after_best_case": hits,
-                "reduction": baseline - hits,
-                "reduction_fraction": (baseline - hits) / baseline if baseline else 0.0,
+                "if_it_binds": as_binder,
+                "if_it_does_not_bind": as_non_binder,
+                "expected_candidates": round(expected, 1),
+                "expected_reduction": round(baseline - expected, 1),
+                "expected_reduction_fraction": (
+                    (baseline - expected) / baseline if baseline else 0.0
+                ),
+                "note": note,
             }
         )
-    advice.sort(key=lambda entry: -int(entry["reduction"]))
+
+    for name, aligned in (candidates or {}).items():
+        residues = [aligned[residue_map.column_of(i)] for i in positions]
+        add(
+            name,
+            residues,
+            "real ortholog",
+            _clade_note(residues, columns, binders, non_binders),
+        )
+
+    if True:
+        # hypothetical relatives are kept alongside any real candidates, so a
+        # weak real candidate is visibly weak rather than the only option shown
+        for relative in binders + non_binders:
+            residues = [columns[i][relative] for i in range(len(columns))]
+            add(
+                f"a close ortholog of {relative}",
+                residues,
+                "hypothetical",
+                "hypothetical: modelled as sequence-identical to a species "
+                "already in the panel, so its figures are an upper bound no real "
+                "ortholog reaches, and it is not a species you can order. Shown "
+                "for context only - pass --candidate-species for real ones",
+            )
+
+    # real orthologs first: a hypothetical relative is modelled as
+    # sequence-identical to a species already in the panel, which makes its
+    # estimate an unreachable upper bound, and you cannot order it in any case.
+    # Within each kind, rank by expected resolution.
+    advice.sort(
+        key=lambda entry: (
+            0 if entry["kind"] == "real ortholog" else 1,
+            -float(entry["expected_reduction"]),
+        )
+    )
     return advice
+
+
+def _clade_note(
+    residues: Sequence[str],
+    columns: Sequence[Dict[str, str]],
+    binders: Sequence[str],
+    non_binders: Sequence[str],
+) -> str:
+    """Does this candidate sit outside both existing clades?
+
+    A species placed between the two groups partitions the candidate set far
+    more evenly than another member of either, which is why it is worth naming.
+    """
+    def identity(group: Sequence[str]) -> float:
+        total = matches = 0
+        for index, column in enumerate(columns):
+            for name in group:
+                other = column[name]
+                if other in (GAP, MISSING) or residues[index] in (GAP, MISSING):
+                    continue
+                total += 1
+                matches += 1 if other == residues[index] else 0
+        return 100.0 * matches / total if total else 0.0
+
+    to_binders = identity(binders)
+    to_non_binders = identity(non_binders)
+    within_binders = 0.0
+    if len(binders) > 1:
+        pairs = 0
+        for a, b in itertools.combinations(binders, 2):
+            for column in columns:
+                if column[a] in (GAP, MISSING) or column[b] in (GAP, MISSING):
+                    continue
+                pairs += 1
+                within_binders += 1 if column[a] == column[b] else 0
+        within_binders = 100.0 * within_binders / pairs if pairs else 0.0
+
+    if within_binders and max(to_binders, to_non_binders) < within_binders - 5:
+        return (
+            f"sits outside both clades ({to_binders:.0f}% identical to the "
+            f"binders, {to_non_binders:.0f}% to the non-binders): it breaks the "
+            "split rather than deepening it"
+        )
+    closer = "binder" if to_binders >= to_non_binders else "non-binder"
+    return (
+        f"{to_binders:.0f}% identical to the binders, {to_non_binders:.0f}% to "
+        f"the non-binders - inside the {closer} clade"
+    )
