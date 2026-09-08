@@ -105,6 +105,19 @@ misleading things. Each now has a test:
 | oligomer and glycan warnings never touching the score | `test_a_wholly_glycan_proximal_patch_is_discounted_and_labelled`, `test_penalties_change_the_ranking_not_just_the_prose` |
 | "within the analysed range" contradicting the topology exclusion above it | `test_baseline_counts_track_each_narrowing_step` |
 
+## What the third real run added
+
+| failure on the real target | test |
+|---|---|
+| `--candidate-species` rejected every input format | `tests/test_candidate_inputs.py` (all four shapes) |
+| an ignored input was one warning among eleven | `test_unloadable_candidates_stop_the_run_loudly` |
+| useless error for a missing file | `test_missing_file_says_so_and_looks_for_it` |
+| `dom:whole chain` recommended as a swap | `test_a_domain_covering_most_of_the_chain_is_not_a_swap_target` |
+| top-ranked patch missing from every merged surface | `test_no_patch_disappears_from_the_surface_enumeration` |
+| a 21 A partner chosen over a 14 A one | `test_the_tightest_compatible_partner_is_chosen_not_the_highest_scoring` |
+| re-running overwrote the previous results | `test_outdir_refuses_to_overwrite_a_previous_run` |
+| the same six flags re-derived every run | `tests/test_targets.py` (profile, provenance, guards) |
+
 ## Metrics reported
 
 * **hit in top 1 / top 3** - does the top-ranked (or any of the top three)

@@ -76,6 +76,29 @@ a 4-character PDB ID, or an AlphaFold DB accession; the latter two are fetched
 and cached. Every flag can also live in a `--config run.yaml`, and anything on
 the command line overrides the file, so a run can be repeated with one tweak.
 
+### Target profiles
+
+If you analyse the same protein repeatedly, a profile supplies its defaults:
+
+```bash
+epitope-map --list-targets
+epitope-map --target tfr1 --binding binding.csv --structure AF-Q62351-F1 --outdir results/run-1
+```
+
+`--target tfr1` fills in the four species and their accessions, the membrane
+topology, the four **structural** domains (which UniProt's feature table does
+not contain), and nine candidate orthologs to price for the panel advice.
+Anything you pass explicitly wins, and the report's parameter table marks every
+value `you` or `profile:tfr1` so a mis-set `--target` cannot pass unnoticed. The
+profile also carries known-bad accessions - a run using one is refused with the
+reason - and an identity floor, so a TFR2 paralog or a PA-fold lookalike is
+flagged rather than quietly scored.
+
+A profile is a data file (`epitope_map/data/targets/tfr1.yaml`); adding a target
+is adding a file. It deliberately does **not** choose `--structure`: the
+experimental structures it lists need their assembly and resolution checked
+first, and the report says so rather than deciding for you.
+
 ### Topology is required
 
 An antibody reaches the outside of a cell and nothing else. Without knowing
@@ -170,6 +193,31 @@ reference must be a binder - numbering and structure are anchored to it.
    sits in one annotated domain; and reciprocal mutants with the gain-of-binding
    direction prioritised, since loss of binding alone can be generic misfolding.
 
+### What the third real run changed
+
+- **`--candidate-species` never accepted anything.** `action="append"` gives one
+  list element per use of the flag, and the splitter only split *strings*, so a
+  comma-separated list arrived as a single token and was rejected as an
+  unrecognised accession - the documented format had never worked. All four
+  shapes now load: a FASTA path, `label=ACCESSION` lists, bare accession lists,
+  and the flag repeated. Failures name the item and the cause (missing file,
+  and where a file of that name does exist; unparseable FASTA; fetch status;
+  unrecognised shape), and an input that cannot be loaded is now a **fatal
+  `INPUT IGNORED` banner with a non-zero exit** rather than one warning among
+  eleven.
+- **A whole-chain "domain" was being recommended as a swap.** A domain covering
+  more than 60% of the analysed range localises nothing, and the contact-graph
+  decomposition returns exactly that for a protein it cannot split. It is now
+  refused with `domain_covers_most_of_the_chain`, pointing at `--domains` or a
+  target profile.
+- **Patches vanished from the merged-surface list.** A patch that fits with
+  nothing is now reported standing alone with the reason, groups record which
+  patch they grew from, and growth takes the *tightest* compatible partner
+  rather than the highest-scoring one - so a 21 A partner is never chosen over
+  a 14 A one that also fits.
+- **A non-empty `--outdir` is refused** without `--force`, so a previous run
+  survives to be diffed, and the error suggests the `--compare-run` invocation.
+
 ### What the second real run changed
 
 The v0.2.0 run on the same target kept its defensible top hit, but three things
@@ -243,6 +291,8 @@ target. Everything below exists because of that run:
 | `--domains` | contact graph | TSV of structural domains to use instead |
 | `--candidate-species` | none | orthologs to score for the panel advice |
 | `--compare-run` | none | previous outdir, for `patch_id_map.tsv` |
+| `--target` | none | built-in profile of defaults; `--list-targets` |
+| `--force` | off | allow writing into a non-empty `--outdir` |
 | `--ectodomain-numbering` | `structure` | or `sequence` for 1-based reference positions |
 | `--mismatch-tolerance` | 0.05 | sequence/structure disagreement before the run stops |
 

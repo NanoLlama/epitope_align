@@ -86,6 +86,22 @@ cut a helix in half. Neither is required.
 
 ---
 
+## The short path for a target you run repeatedly
+
+If your protein has a built-in profile, most of the gathering below is already
+done:
+
+```bash
+epitope-map --list-targets
+epitope-map --target tfr1 --binding binding.csv --structure AF-Q62351-F1 --outdir results/run-1
+```
+
+That supplies the species and their accessions, which part of the protein faces
+outwards, the structural domains, and a list of candidate orthologs worth
+testing next. You still supply your binding results and a structure. Everything
+you pass explicitly overrides the profile, and the report says which values were
+yours and which were the profile's.
+
 ## What you need to gather
 
 This is the actual work — the software is the easy part.
@@ -246,6 +262,15 @@ complains, choose **Runtime → Restart session** and run Step 1 again.
 **"command not found: epitope-map"** — the install did not finish, or a new
 terminal window lost it. Re-run `pip install -e .` from inside the project
 folder.
+
+**"INPUT IGNORED - NOTHING WAS RUN"** — something you asked for could not be
+loaded, so the run stopped rather than quietly continuing without it. The
+message names the item and the reason; if it is a missing file it also tells you
+where a file of that name does exist, which is usually the answer (Colab uploads
+land in `/content/`, not in your run directory).
+
+**"--outdir ... already holds results"** — the previous run is being protected
+so you can still compare against it. Use a new directory, or `--force`.
 
 **"the membrane topology of the reference could not be determined"** — this is
 the tool refusing to score the inside of a cell. Give it `--topology` as

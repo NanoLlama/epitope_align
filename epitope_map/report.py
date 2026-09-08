@@ -677,6 +677,33 @@ def _patch_section(result: RunResult) -> str:
     return "\n".join(blocks)
 
 
+def _profile_section(result: RunResult) -> str:
+    profile = result.config.profile
+    if profile is None:
+        return (
+            "\nNo target profile was used. If you analyse this protein "
+            "repeatedly, `--target <key>` supplies its sequences, topology, "
+            "structural domains and candidate orthologs as defaults; "
+            "`--list-targets` shows what is installed."
+        )
+    lines = [
+        "",
+        f"Target profile: **{profile.name}** (`--target {profile.key}`)"
+        + (f" - {profile.description}" if profile.description else ""),
+        "",
+        "Values marked `profile:" + profile.key + "` above were supplied by that "
+        "profile; everything marked `you` came from the command line or config "
+        "file.",
+    ]
+    if profile.structures and result.structure.is_alphafold:
+        lines += ["", f"- {profile.structure_recommendation()}"]
+    if profile.notes:
+        lines.append("")
+        for note in profile.notes:
+            lines.append(f"- Profile note: {note}")
+    return "\n".join(lines)
+
+
 def _topology_section(result: RunResult) -> str:
     topology = result.topology
     lines = [f"- Topology: {topology.summary()}."]
@@ -769,12 +796,13 @@ def _merged_surfaces_section(result: RunResult) -> str:
         f"against the {TYPICAL_EPITOPE_BSA[0]:.0f}-{TYPICAL_EPITOPE_BSA[1]:.0f} "
         "A^2 an antibody buries.",
         "",
-        "| patches | residues | combined area (A^2) | spread (A) | widest gap (A) | verdict |",
-        "|---|---|---|---|---|---|",
+        "| patches | grown from | residues | combined area (A^2) | spread (A) | widest gap (A) | verdict |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for surface in result.merged_surfaces[:5]:
+    for surface in result.merged_surfaces[:8]:
         lines.append(
-            f"| {' + '.join(surface['patches'])} | {surface['n_residues']} "
+            f"| {' + '.join(surface['patches'])} | {surface.get('grown_from', '')} "
+            f"| {surface['n_residues']} "
             f"({', '.join(str(r) for r in surface['residues'])}) | "
             f"{float(surface['accessible_area_A2']):.0f} | "
             f"{float(surface['spread_A']):.1f} | {float(surface['max_gap_A']):.1f} | "
@@ -1038,8 +1066,10 @@ def write_report(result: RunResult, path: Path) -> Path:
     structure = result.structure
     singletons = result.singletons
 
+    provenance = config.provenance or {}
     parameters = "\n".join(
-        f"| {key} | {value} |" for key, value in sorted(config.as_dict().items())
+        f"| {key} | {value} | {provenance.get(key, 'you' if value != '-' else '-')} |"
+        for key, value in sorted(config.as_dict().items())
     )
     warnings_block = (
         "\n".join(f"- {w}" for w in result.warnings)
@@ -1097,9 +1127,10 @@ See `divergence.svg` for the same thing as a profile along the chain.
 
 ## 2. Run parameters
 
-| parameter | value |
-|---|---|
+| parameter | value | from |
+|---|---|---|
 {parameters}
+{_profile_section(result)}
 
 Structure: `{structure.path.name}`, chain `{structure.chain_id}`,
 {len(structure.residues)} modelled residues, {structure.assembly}, SASA backend

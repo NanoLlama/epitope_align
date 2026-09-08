@@ -97,10 +97,17 @@ def write_binding_csv(calls: Dict[str, str], path: Path) -> Path:
 
 
 def sequence_labels(spec: str) -> List[str]:
-    """Species labels implied by a ``--sequences`` value (accessions or FASTA)."""
+    """Species labels implied by a ``--sequences`` value (accessions or FASTA).
+
+    An empty value is not an error: the sequences may be coming from a target
+    profile, in which case the labels are not known until the run starts.
+    """
     spec = str(spec).strip()
-    if Path(spec).exists():
-        return [record.name for record in parse_fasta(Path(spec).read_text())]
+    if not spec:
+        return []
+    path = Path(spec)
+    if path.is_file():
+        return [record.name for record in parse_fasta(path.read_text())]
     labels = []
     for item in re.split(r"[,\s]+", spec):
         if not item:
@@ -125,8 +132,14 @@ def check_panel(
     def norm(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", value.lower())
 
+    if not labels:
+        notes.append(
+            "the sequences are coming from a target profile, so the species "
+            "labels are not known yet; they are checked against your binding "
+            "table when the run starts"
+        )
     label_by_norm = {norm(label): label for label in labels}
-    for species in calls:
+    for species in calls if labels else []:
         if norm(species) not in label_by_norm:
             problems.append(
                 f"'{species}' has a binding result but no sequence. Sequence "

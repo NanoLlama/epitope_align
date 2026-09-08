@@ -216,3 +216,46 @@ def test_shipped_tfr1_config_parses():
     assert config.reference == "mouse"
     assert "extracellular=89-763" in config.topology
     assert config.radius_sweep == [10.0, 12.0, 14.0, 16.0, 18.0]
+
+
+def test_outdir_refuses_to_overwrite_a_previous_run(synthetic_inputs, tmp_path):
+    """Overwriting in place destroys the ability to diff two runs."""
+    outdir = tmp_path / "run"
+    argv = [
+        "--sequences", str(synthetic_inputs["sequences"]),
+        "--binding", str(synthetic_inputs["binding"]),
+        "--reference", "mouse",
+        "--structure", str(synthetic_inputs["structure"]),
+        "--topology", "whole-chain",
+        "--outdir", str(outdir),
+    ]
+    assert main(argv + ["--quiet"]) == 0
+    stamp = (outdir / "report.md").stat().st_mtime_ns
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv + ["--quiet"])
+    assert excinfo.value.code == 2
+    assert (outdir / "report.md").stat().st_mtime_ns == stamp  # untouched
+
+    assert main(argv + ["--quiet", "--force"]) == 0
+    assert (outdir / "report.md").stat().st_mtime_ns != stamp
+
+
+def test_outdir_error_suggests_how_to_compare(synthetic_inputs, tmp_path, capsys):
+    outdir = tmp_path / "run"
+    argv = [
+        "--sequences", str(synthetic_inputs["sequences"]),
+        "--binding", str(synthetic_inputs["binding"]),
+        "--reference", "mouse",
+        "--structure", str(synthetic_inputs["structure"]),
+        "--topology", "whole-chain",
+        "--outdir", str(outdir),
+        "--quiet",
+    ]
+    main(argv)
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main(argv)
+    message = capsys.readouterr().err
+    assert "--force" in message
+    assert "--compare-run" in message

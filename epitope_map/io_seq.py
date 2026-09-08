@@ -172,7 +172,16 @@ def _uniprot_get(url: str, timeout: int = 60):
         raise InputError(
             f"cannot fetch {url}: requests is not installed"
         ) from exc
-    return requests.get(url, timeout=timeout)
+    try:
+        return requests.get(url, timeout=timeout)
+    except Exception as exc:  # network, proxy, DNS, TLS
+        # a blocked or offline network is a normal condition for this tool, not
+        # a crash: say which accession could not be reached and why
+        raise InputError(
+            f"could not reach UniProt for {url.rsplit('/', 1)[-1]}: {exc.__class__.__name__}. "
+            "If this machine has no outbound access, download the sequences and "
+            "pass a FASTA file instead."
+        ) from None
 
 
 def _fetch_uniprot(accession: str, cache_dir: Optional[Path] = None) -> SpeciesRecord:
@@ -194,7 +203,13 @@ def _fetch_uniprot(accession: str, cache_dir: Optional[Path] = None) -> SpeciesR
         response = _uniprot_get(_UNIPROT_FASTA_URL.format(acc=accession))
         if response.status_code != 200:
             raise InputError(
-                f"UniProt fetch failed for {accession}: HTTP {response.status_code}"
+                f"UniProt fetch failed for {accession}: HTTP "
+                f"{response.status_code}"
+                + (
+                    " - no such accession"
+                    if response.status_code == 404
+                    else ""
+                )
             )
         if fasta_cache is not None:
             fasta_cache.write_text(response.text)
@@ -234,23 +249,71 @@ def _fetch_uniprot_features(
     return payload
 
 
+ACCEPTED_FORMATS = (
+    "  a FASTA file path            candidates.fasta\n"
+    "  label=ACCESSION, comma list  dog=Q9GLD3,cat=Q9MYZ3\n"
+    "  bare accessions, comma list  Q9GLD3,Q9MYZ3\n"
+    "  any mixture of the above, and the flag may be repeated"
+)
+
+
+def _find_nearby(name: str, root: Path = Path("."), limit: int = 3) -> List[Path]:
+    """Somewhere else under the working directory, is there a file of this name?
+
+    Uploading to one directory and pointing at another is the single most common
+    way this goes wrong, so it is worth answering rather than just denying.
+    """
+    try:
+        return sorted(root.rglob(name))[:limit]
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return []
+
+
+def _describe_missing_path(token: str) -> str:
+    path = Path(token)
+    message = f"no such file: {token}"
+    nearby = _find_nearby(path.name)
+    if nearby:
+        message += (
+            "\n  a file of that name does exist at: "
+            + ", ".join(str(p) for p in nearby)
+        )
+    parent = path.parent
+    if str(parent) not in (".", "") and not parent.exists():
+        message += f"\n  the directory {parent} does not exist either"
+    return message
+
+
+def _looks_like_path(token: str) -> bool:
+    return (
+        "/" in token
+        or token.startswith("~")
+        or token.lower().endswith((".fasta", ".fa", ".faa", ".fas", ".txt", ".seq"))
+    )
+
+
 def load_sequences(
     spec: Sequence[str] | str | os.PathLike, cache_dir: Optional[Path] = None
 ) -> List[SpeciesRecord]:
-    """Load sequences from a FASTA path, or fetch a list of UniProt accessions.
+    """Load sequences from FASTA files, UniProt accessions, or a mixture.
 
-    ``spec`` may be a path to a FASTA file, or a sequence of items each of which
-    is either a UniProt accession (``Q61503``) or ``label=ACCESSION`` to give the
-    fetched sequence a friendlier species name.
+    Every accepted shape is listed in :data:`ACCEPTED_FORMATS`. Failures name
+    the item that failed and why, rather than reporting the whole argument as
+    unrecognised - which told a user nothing when one accession in a list of
+    nine was wrong, or when a file was uploaded to a different directory.
     """
     if isinstance(spec, (str, os.PathLike)) and Path(spec).exists():
         return parse_fasta(Path(spec).read_text())
 
-    items: List[str]
-    if isinstance(spec, (str, os.PathLike)):
-        items = [s for s in re.split(r"[,\s]+", str(spec)) if s]
-    else:
-        items = list(spec)
+    items: List[str] = []
+    raw = [spec] if isinstance(spec, (str, os.PathLike)) else list(spec)
+    for entry in raw:
+        if isinstance(entry, (str, os.PathLike)) and Path(entry).exists():
+            items.append(str(entry))  # a path may contain commas; do not split it
+            continue
+        # a repeated flag gives one list element per use, and each of those may
+        # itself be a comma-separated list
+        items.extend(part for part in re.split(r"[,\s]+", str(entry)) if part)
     if not items:
         raise InputError("no sequences supplied")
 
@@ -265,15 +328,26 @@ def load_sequences(
         # an item may itself be a FASTA file, so a list can mix files and
         # accessions - which is what a candidate-ortholog list tends to look like
         if Path(accession).exists():
-            parsed = parse_fasta(Path(accession).read_text())
+            try:
+                parsed = parse_fasta(Path(accession).read_text())
+            except InputError as exc:
+                raise InputError(
+                    f"{accession} is not readable as FASTA: {exc}"
+                ) from None
+            except OSError as exc:
+                raise InputError(f"cannot read {accession}: {exc}") from None
             if label and len(parsed) == 1:
                 parsed[0].name = label.strip()
             records.extend(parsed)
             continue
 
+        if _looks_like_path(accession):
+            raise InputError(_describe_missing_path(accession))
+
         if not _UNIPROT_RE.match(accession):
             raise InputError(
-                f"{item!r} is neither an existing FASTA path nor a UniProt accession"
+                f"{item!r} is not a UniProt accession and does not look like a "
+                f"file path. Accepted formats:\n{ACCEPTED_FORMATS}"
             )
         record = _fetch_uniprot(accession, cache_dir=cache_dir)
         if label:

@@ -190,3 +190,27 @@ def test_impractical_segments_are_not_redirected_to_a_wrong_domain_swap():
     problems = " ".join(suggestion.problems)
     assert "no annotated domain contains the whole patch" in problems
     assert "use the domain-level swap instead" not in problems
+
+
+def test_a_domain_covering_most_of_the_chain_is_not_a_swap_target():
+    """P0-4 part 2: 'swap dom:whole chain' passes containment and says nothing."""
+    from epitope_map.suggest import ChimeraSuggestion, _add_domain_swap
+
+    patch, members = _patch_with({n: "whole chain" for n in (202, 250, 288)},
+                                 [202, 250, 288])
+    by_index = {m.ref_index: m for m in members}
+
+    degenerate = ChimeraSuggestion(patch_id=patch.patch_id)
+    _add_domain_swap(degenerate, patch, by_index, {"whole chain": 700}, analysed=763)
+    assert degenerate.domain_swap == ""
+    assert "domain_covers_most_of_the_chain" in degenerate.domain_swap_reason
+    assert "92%" in degenerate.domain_swap_reason
+    assert "--domains" in degenerate.domain_swap_reason
+
+    # a real domain of sensible size is still offered
+    patch, members = _patch_with({n: "apical" for n in (202, 250, 288)},
+                                 [202, 250, 288])
+    real = ChimeraSuggestion(patch_id=patch.patch_id)
+    _add_domain_swap(real, patch, {m.ref_index: m for m in members},
+                     {"apical": 195}, analysed=763)
+    assert real.domain_swap == "dom:apical"

@@ -51,6 +51,7 @@ from .score import (
     score_alignment,
 )
 from .structure import StructureError, StructureModel, distance, load_structure
+from .targets import TargetProfile
 from .topology import (
     AssemblyEvidence,
     Segment,
@@ -88,6 +89,9 @@ class RunConfig:
     species_structures: List[str] = field(default_factory=list)
     candidate_species: List[str] = field(default_factory=list)
     compare_run: Optional[str] = None
+    target: Optional[str] = None
+    profile: Optional["TargetProfile"] = None
+    provenance: Dict[str, str] = field(default_factory=dict)
     radius_sweep: List[float] = field(default_factory=list)
     prefer_assembly: bool = True
     chain: Optional[str] = None
@@ -112,6 +116,8 @@ class RunConfig:
     def as_dict(self) -> Dict[str, str]:
         out: Dict[str, str] = {}
         for key, value in self.__dict__.items():
+            if key in ("profile", "provenance"):
+                continue
             if value is None or value == [] :
                 out[key] = "-"
             elif isinstance(value, tuple):
@@ -328,7 +334,12 @@ def _align_candidates(
     try:
         records = load_sequences(config.candidate_species, cache_dir=config.cache_dir)
     except InputError as exc:
-        return {}, [f"--candidate-species ignored: {exc}"]
+        # the user asked for something and would not get it; a warning buried in
+        # a list of eleven others is how three runs shipped without candidates
+        raise InputError(
+            "--candidate-species could not be loaded, so the panel advice would "
+            f"have silently fallen back to hypotheticals:\n{exc}"
+        ) from None
 
     reference_record = dataset.get(reference)
     out: Dict[str, str] = {}
@@ -472,6 +483,47 @@ def resolve_topology(
     return topology, domains
 
 
+def _check_against_profile(
+    config: RunConfig,
+    dataset: Dataset,
+    alignment: Alignment,
+    reference: str,
+) -> List[str]:
+    """Guards a target profile can apply to whatever was actually loaded.
+
+    A profile knows which accessions are gene-model artifacts and roughly how
+    identical a true ortholog should be, so a paralog that aligns plausibly -
+    TFR2, or glutamate carboxypeptidase II sharing the PA fold - is caught here
+    rather than quietly poisoning the run.
+    """
+    profile = config.profile
+    if profile is None:
+        return []
+
+    notes: List[str] = []
+    for record in dataset.records:
+        entry = profile.avoided(record.accession or record.name)
+        if entry is not None:
+            raise InputError(
+                f"{record.name} uses {entry.accession}, which this target "
+                f"profile lists as known-bad ({entry.species}): {entry.reason}"
+            )
+
+    threshold = None
+    for guard in profile.identity_guards:
+        if "max_identity_to_reference" in guard:
+            threshold = float(guard["max_identity_to_reference"])
+    if threshold is not None:
+        for name, identity in alignment.identities.items():
+            if identity < threshold:
+                notes.append(
+                    f"{name} is only {identity:.1f}% identical to {reference}, "
+                    f"below the {threshold:.0f}% this target profile expects of a "
+                    "true ortholog - check it is not a paralog"
+                )
+    return notes
+
+
 def resolve_domains(
     config: RunConfig, structure: StructureModel, residue_map: ResidueMap
 ) -> Tuple[List[StructuralDomain], str]:
@@ -522,6 +574,8 @@ def run_pipeline(config: RunConfig) -> RunResult:
     )
     # the degeneracy check needs the aligned sequences to build its tree
     setattr(dataset, "_alignment_sequences", alignment.sequences)
+
+    profile_notes = _check_against_profile(config, dataset, alignment, reference)
 
     topology, domain_segments = resolve_topology(config, dataset, reference)
     if not (topology.known or topology.whole_chain or config.ectodomain):
@@ -614,10 +668,14 @@ def run_pipeline(config: RunConfig) -> RunResult:
     apply_confidence_penalties(
         patches,
         oligomer_unmodelled=(
-            evidence.oligomeric
+            (evidence.oligomeric or bool(config.profile and config.profile.oligomer))
             and not (config.context_chains or config.assembly_context)
         ),
-        interface_regions=interface_regions(domain_segments),
+        interface_regions=(
+            config.profile.interface_ranges()
+            if config.profile and config.profile.interface_ranges()
+            else interface_regions(domain_segments)
+        ),
     )
     _rerank_after_penalties(patches)
     _score_indels(rows, patches, footprint=config.footprint_diameter)
@@ -730,6 +788,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
 
     warnings_ = (
         warnings_topology
+        + profile_notes
         + candidate_notes
         + assembly_notes
         + equivalence_warnings

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epitope-map"
-version = "0.3.0"
+version = "0.4.0"
 description = "Comparative epitope mapping from cross-species antibody binding data"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,9 @@ epitope-map = "epitope_map.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["epitope_map*"]
+
+[tool.setuptools.package-data]
+epitope_map = ["data/targets/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

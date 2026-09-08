@@ -20,6 +20,7 @@ from .patches import (
     FOOTPRINT_DIAMETER,
 )
 from .structure import StructureError
+from .targets import TargetProfile, describe_targets, load_profile
 
 
 def parse_range(text: str) -> Tuple[int, int]:
@@ -54,6 +55,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the built-in worked example end to end and write its results "
         "to --outdir; use this to check the installation works before "
         "assembling your own inputs",
+    )
+    parser.add_argument(
+        "--target",
+        help="built-in target profile supplying defaults (sequences, topology, "
+        "structural domains, candidate orthologs). Anything you pass explicitly "
+        "wins over the profile. See --list-targets",
+    )
+    parser.add_argument(
+        "--list-targets",
+        action="store_true",
+        help="list the built-in target profiles and exit",
     )
     parser.add_argument("--config", type=Path, help="YAML config file with the same keys")
     parser.add_argument(
@@ -192,6 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-dssp", action="store_true", help="skip DSSP even if it is installed"
     )
     parser.add_argument("--cache-dir", type=Path, help="where fetched files are cached")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="write into --outdir even if it already contains results "
+        "(by default a non-empty directory is refused, so a previous run is "
+        "not overwritten and can still be diffed)",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--version", action="version", version=f"epitope-map {__version__}")
     return parser
@@ -225,11 +244,26 @@ def _sequences_value(value) -> str:
 
 
 def _split_list(value) -> List[str]:
+    """Flatten a repeatable flag into individual items.
+
+    argparse's ``append`` gives one list element per use of the flag, and each of
+    those may itself be a comma-separated list - so the elements have to be split
+    too. Missing that meant `--candidate-species a=X,b=Y` arrived as a single
+    token and was rejected as an unrecognised accession.
+    """
     if not value:
         return []
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return [v.strip() for v in str(value).split(",") if v.strip()]
+    entries = value if isinstance(value, (list, tuple)) else [value]
+    out: List[str] = []
+    for entry in entries:
+        text = str(entry).strip()
+        if not text:
+            continue
+        if Path(text).exists():
+            out.append(text)  # a path may legitimately contain a comma
+            continue
+        out.extend(part.strip() for part in text.split(",") if part.strip())
+    return out
 
 
 def demo_config(outdir: Path) -> RunConfig:
@@ -247,6 +281,43 @@ def demo_config(outdir: Path) -> RunConfig:
     )
 
 
+def apply_profile(
+    values: Dict[str, object], profile: TargetProfile, outdir: Path
+) -> Dict[str, str]:
+    """Fill in what the user did not supply, recording what came from where.
+
+    Returns a mapping of option name -> provenance, so the report can state for
+    every value whether it was the user's or the profile's. A default that
+    cannot be told apart from a choice is how a mis-set --target would go
+    unnoticed.
+    """
+    provenance: Dict[str, str] = {}
+
+    def fill(key: str, value: object) -> None:
+        if value in (None, "", [], {}):
+            return
+        if values.get(key) in (None, "", [], {}):
+            values[key] = value
+            provenance[key] = f"profile:{profile.key}"
+
+    fill("sequences", profile.sequences_value())
+    fill("reference", profile.reference)
+    fill("topology", profile.topology_value())
+    fill("candidate_species", profile.candidates_value())
+
+    if profile.domains and not values.get("domains"):
+        table = Path(outdir) / f"{profile.key}_domains.tsv"
+        table.parent.mkdir(parents=True, exist_ok=True)
+        table.write_text(profile.domains_table())
+        values["domains"] = str(table)
+        provenance["domains"] = f"profile:{profile.key}"
+
+    # deliberately not filled: --structure. The profile lists experimental
+    # structures but says to check assembly and resolution first, so choosing
+    # one silently would be exactly the kind of hidden decision this avoids.
+    return provenance
+
+
 def config_from_args(args: argparse.Namespace) -> RunConfig:
     values: Dict[str, object] = {}
     if args.config:
@@ -254,7 +325,7 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
 
     parser = build_parser()
     for key, value in vars(args).items():
-        if key in ("config", "quiet", "demo"):
+        if key in ("config", "quiet", "demo", "target", "list_targets"):
             continue
         if value is None:
             continue
@@ -263,6 +334,15 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         if key in values and value == parser.get_default(key):
             continue
         values[key] = value
+
+    profile: Optional[TargetProfile] = None
+    provenance: Dict[str, str] = {}
+    target = getattr(args, "target", None) or values.get("target")
+    if target:
+        profile = load_profile(str(target))
+        provenance = apply_profile(
+            values, profile, Path(values.get("outdir", "results"))
+        )
 
     required = ("sequences", "binding", "reference", "structure")
     missing = [key for key in required if not values.get(key)]
@@ -294,6 +374,9 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         species_structures=_split_list(values.get("species_structure")),
         candidate_species=_split_list(values.get("candidate_species")),
         compare_run=str(values["compare_run"]) if values.get("compare_run") else None,
+        target=str(target) if target else None,
+        profile=profile,
+        provenance=provenance,
         radius_sweep=[float(r) for r in _split_list(values.get("radius_sweep"))],
         prefer_assembly=(
             str(values["assembly"]).strip().lower().startswith("bio")
@@ -328,18 +411,58 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
     )
 
 
+RESULT_FILES = ("report.md", "patches.tsv", "residues.tsv")
+
+
+def _check_outdir(outdir: Path, force: bool = False) -> None:
+    """Refuse to write over a previous run unless asked to.
+
+    Overwriting in place destroys the ability to diff two runs, which is the
+    main way anyone tells whether a parameter change helped.
+    """
+    outdir = Path(outdir)
+    if force or not outdir.exists():
+        return
+    existing = [name for name in RESULT_FILES if (outdir / name).exists()]
+    if not existing:
+        return
+    raise InputError(
+        f"--outdir {outdir} already holds results ({', '.join(existing)}).\n"
+        "Writing here would overwrite them and you could no longer diff the two "
+        "runs. Choose a new directory, or pass --force to overwrite.\n"
+        f"To compare instead:  --outdir {outdir.parent / (outdir.name + '-2')} "
+        f"--compare-run {outdir}"
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "list_targets", False):
+        print(describe_targets())
+        return 0
     try:
         if args.demo:
             outdir = args.outdir if args.outdir != Path("results") else Path("demo-run")
             config = demo_config(outdir)
         else:
             config = config_from_args(args)
+            _check_outdir(config.outdir, force=args.force)
         result = run_pipeline(config)
         paths = write_all(result, config.outdir)
     except (InputError, AlignmentError, StructureError) as exc:
+        message = str(exc)
+        if message.lstrip().startswith("--candidate-species") or message.lstrip().startswith(
+            "--species-structure"
+        ):
+            # an input the user explicitly asked for was not usable: make it the
+            # loudest thing on the screen rather than one line among many
+            banner = "=" * 72
+            parser.exit(
+                2,
+                f"\n{banner}\nINPUT IGNORED - NOTHING WAS RUN\n{banner}\n"
+                f"{message}\n{banner}\n",
+            )
         parser.exit(2, f"error: {exc}\n")
         return 2
 

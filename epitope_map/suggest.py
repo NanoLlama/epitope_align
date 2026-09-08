@@ -32,6 +32,12 @@ _FLANK = 2
 MAX_SWAP_LENGTH = 40
 MAX_SEGMENTS = 2
 
+#: A "domain" covering more than this fraction of the analysed range does not
+#: localise anything: swapping it is just testing the other species' protein.
+#: The contact-graph decomposition returns exactly this for a protein it cannot
+#: split, and the containment check passes it trivially.
+MAX_DOMAIN_FRACTION = 0.60
+
 
 @dataclass
 class ChimeraSegment:
@@ -173,6 +179,12 @@ def suggest_chimeras(
     """
     by_ref_index = {r.ref_index: r for r in residues}
     n = len(residues)
+    domain_sizes: Dict[str, int] = {}
+    for residue in residues:
+        if residue.domain:
+            domain_sizes[residue.domain] = domain_sizes.get(residue.domain, 0) + 1
+    analysed = sum(1 for r in residues if r.accessible)
+
     suggestions: List[ChimeraSuggestion] = []
     for patch in patches[:top_n]:
         segments: List[ChimeraSegment] = []
@@ -233,7 +245,7 @@ def suggest_chimeras(
             n_discriminating_included=n_disc,
             note=note,
         )
-        _add_domain_swap(suggestion, patch, by_ref_index)
+        _add_domain_swap(suggestion, patch, by_ref_index, domain_sizes, analysed)
         _check_constructible(suggestion, by_ref_index)
         suggestions.append(suggestion)
     return suggestions
@@ -286,6 +298,8 @@ def _add_domain_swap(
     suggestion: ChimeraSuggestion,
     patch: Patch,
     by_ref_index: Dict[int, ResidueAnalysis],
+    domain_sizes: Optional[Dict[str, int]] = None,
+    analysed: int = 0,
 ) -> None:
     """Name a whole-domain swap only when the domain contains the whole patch.
 
@@ -301,7 +315,19 @@ def _add_domain_swap(
     ]
     named = {d for d in assignments if d}
     if len(named) == 1 and all(assignments):
-        suggestion.domain_swap = f"dom:{named.pop()}"
+        name = named.pop()
+        size = (domain_sizes or {}).get(name, 0)
+        if analysed and size > MAX_DOMAIN_FRACTION * analysed:
+            suggestion.domain_swap = ""
+            suggestion.domain_swap_reason = (
+                f"domain_covers_most_of_the_chain: dom:{name} spans {size} of "
+                f"{analysed} analysed residues ({size / analysed:.0%}), so "
+                "swapping it localises nothing - it is close to testing the "
+                "other species' protein whole. Supply real domain boundaries "
+                "with --domains or a --target profile"
+            )
+            return
+        suggestion.domain_swap = f"dom:{name}"
         return
 
     suggestion.domain_swap = ""

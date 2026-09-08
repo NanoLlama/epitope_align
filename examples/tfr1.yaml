@@ -1,75 +1,44 @@
 # Transferrin receptor 1: mouse and rat bind, human and marmoset do not.
 #
-# This is the configuration the first real run should have used. It is written
-# out here because every option in it exists because that run went wrong without
-# it - see the comments.
-#
-#   epitope-map --config examples/tfr1.yaml
+#   epitope-map --config examples/tfr1.yaml --outdir results/tfr1-run-1
 #
 # Needs network access (UniProt and AlphaFold DB).
-
-sequences:
-  mouse: Q62351
-  rat: Q99376
-  human: P02786
-  marmoset: U3FHF5
+#
+# Almost everything comes from the built-in target profile: sequences,
+# topology, the four structural domains, and nine candidate orthologs. Run
+# `epitope-map --list-targets` to see it, or read
+# epitope_map/data/targets/tfr1.yaml. Anything set here wins over the profile,
+# and the report's parameter table says which values came from where.
+target: tfr1
 
 binding: examples/tfr1_binding.csv
-reference: mouse
+
+# The profile lists 1CX8 (ectodomain) and 1SUV (with transferrin) but does not
+# choose for you: check assembly and resolution first. An experimental structure
+# gives a real biological assembly for SASA, which matters here because TfR1 is
+# a disulfide-linked homodimer whose helical domain forms the interface - on an
+# AlphaFold monomer that interface is scored as exposed.
 structure: AF-Q62351-F1
 chain: A
 
-# Topology. Without this the run stops: TfR1 is a type-II membrane protein with
-# a 67-residue cytoplasmic tail and a transmembrane helix, and scoring those
-# gave a confident-looking rank-2 patch no antibody can reach, plus two
-# "differential glycosylation sequons" in the cytoplasm.
-#
-# Leave it out entirely and it is read from the UniProt entry automatically,
-# since the sequences above are accessions. Written out explicitly:
-topology: cytoplasmic=1-67,tm=68-88,extracellular=89-763
-
-# The 89-120 stalk is disordered in the AlphaFold model (mean pLDDT ~35) and the
-# least constrained part of the protein, so it looks discriminating everywhere
-# and its RSA is meaningless. Excluded by default; this says so explicitly.
-disordered_region_exclusion: true
-
 # The apical surface came back split across several patches at 12 A. The sweep
-# shows which of them are one surface.
+# says which of them are one surface; 30 A is what a paratope covers.
 patch_radius: 12
 radius_sweep: 10,12,14,16,18
+footprint_diameter: 30
 
 rsa_cutoff: 0.20
 min_patch_size: 2
 top_n: 5
 
-# TfR1 is an obligate disulfide-linked homodimer, so a monomer model reports the
-# dimer interface as exposed. With an experimental structure, pass the chains of
-# the partner here instead:
+# With an experimental dimer, name the partner chain so the interface is masked
+# rather than counted as exposed:
 # context_chains: B
-
-# Candidate orthologs for the panel advice: a species outside both existing
-# clades resolves far more than another rodent or another primate. Guinea pig
-# and cynomolgus are the two worth pricing here - fill in the accessions and
-# they will be scored and named in the report.
-# candidate_species:
-#   - guinea_pig=REPLACE_ME
-#   - cyno=REPLACE_ME
 
 # With a human TfR1 structure to hand, derive residue equivalences from 3D
 # rather than from the aligner's guess in the 195-235 loop:
 # equivalence: structural
 # species_structure: human=AF-P02786-F1
 
-# 30 A is what a paratope covers; candidate surfaces are grown only while they
-# still fit inside it, instead of chaining across the whole protein.
-footprint_diameter: 30
-
-# Real structural domains. UniProt's feature table gives "PA" (225-315) and
-# "Ligand-binding" (572-763) - motifs, not the architecture you would swap. The
-# real domains are protease-like 121-188 + 384-606, apical 189-383, helical
-# 607-760, none of which the feature table contains. Without this table the
-# contact graph of the model is decomposed instead.
-# domains: examples/tfr1_domains.tsv
-
 # Map this run's patches onto a previous run's IDs:
-# compare_run: results/previous
+# compare_run: results/tfr1-run-1

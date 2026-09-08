@@ -288,15 +288,17 @@ def test_merging_grows_by_diameter_not_by_chaining():
     assert len(patches) == 4
 
     surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
-    assert surfaces, "neighbouring patches should still group"
+    merged = [s for s in surfaces if len(s["patches"]) > 1]
+    assert merged, "neighbouring patches should still group"
     # nothing may span the whole chain: single linkage would have merged a-b-c
-    for surface in surfaces:
+    for surface in merged:
         assert float(surface["spread_A"]) <= 30.0
         assert surface["verdict"] == "plausible single epitope"
-    # and the isolated group is never pulled in
-    assert all("p:61" not in surface["patches"] for surface in surfaces)
+    # the isolated group is never pulled into a merge, only reported alone
+    assert all("p:61" not in surface["patches"] for surface in merged)
+    assert any(surface["patches"] == ["p:61"] for surface in surfaces)
     # alternative overlapping groupings are offered, not one verdict
-    assert len(surfaces) >= 2
+    assert len(merged) >= 2
 
 
 def test_merged_area_is_the_union_not_a_sum():
@@ -316,7 +318,9 @@ def test_a_merge_that_would_breach_the_footprint_is_refused():
     b = _group(20, (28.0, 0.0, 0.0), n=2)
     patches, singles = find_patches(a + b, discrimination_cutoff=0.25, radius=12.0)
     surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
-    assert not surfaces
+    # no merge is made; both are reported standing alone, with the reason
+    assert all(len(surface["patches"]) == 1 for surface in surfaces)
+    assert all("exceed the 30 A footprint" in s["verdict"] for s in surfaces)
 
 
 def test_a_wholly_glycan_proximal_patch_is_discounted_and_labelled():
@@ -376,3 +380,45 @@ def test_penalties_change_the_ranking_not_just_the_prose():
     apply_confidence_penalties(patches, oligomer_unmodelled=False)
     _rank(patches)
     assert patches[0].members[0].ref_index == 60  # and loses it once discounted
+
+
+def test_no_patch_disappears_from_the_surface_enumeration():
+    """P1-5: the rank-1 patch of each list went missing from every group."""
+    a = _group(0, (0.0, 0.0, 0.0), n=2)
+    b = _group(20, (18.0, 0.0, 0.0), n=2)      # groups with a
+    lonely = _group(90, (300.0, 0.0, 0.0), n=2)  # groups with nothing
+    for r in a + b + lonely:
+        r.sasa = 80.0
+
+    patches, singles = find_patches(
+        a + b + lonely, discrimination_cutoff=0.25, radius=12.0
+    )
+    surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
+
+    listed = {pid for surface in surfaces for pid in surface["patches"]}
+    assert listed == {p.patch_id for p in patches}, "every patch must appear"
+    solo = next(s for s in surfaces if s["patches"] == ["p:91"])
+    assert "stands alone" in solo["verdict"]
+    assert "A away" in solo["verdict"]
+
+
+def test_the_tightest_compatible_partner_is_chosen_not_the_highest_scoring():
+    """A 22 A partner must never be preferred to a 13 A one that also fits."""
+    seed = _group(0, (0.0, 0.0, 0.0), n=2)          # x = 0, 3
+    near = _group(20, (16.0, 0.0, 0.0), n=2)        # 13 A from the seed
+    far = [                                          # 22 A from the seed, on +y
+        residue(40, (0.0, 22.0, 0.0)),
+        residue(41, (0.0, 25.0, 0.0)),
+    ]
+    for r in far:
+        r.composite = 5.0                            # and much higher scoring
+
+    patches, singles = find_patches(
+        seed + near + far, discrimination_cutoff=0.25, radius=10.0
+    )
+    assert len(patches) == 3
+    surfaces = merged_surfaces(patches, singles, footprint_diameter=30.0)
+    # overlapping alternatives are expected; check the group grown from the seed
+    seeded = next(s for s in surfaces if s["grown_from"] == "p:1")
+    assert "p:21" in seeded["patches"]      # the near one
+    assert "p:41" not in seeded["patches"]  # not the far, higher-scoring one

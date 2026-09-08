@@ -1,0 +1,84 @@
+# Transferrin receptor 1 target profile.
+#
+# Everything here is a default: an explicitly passed flag always wins, and the
+# report records which values came from this file.
+name: TfR1 / TFRC / CD71
+description: Transferrin receptor protein 1, type II membrane homodimer
+
+reference_default: mouse
+
+sequences:
+  mouse:    Q62351   # 763 aa
+  rat:      Q99376   # 761 aa
+  human:    P02786   # 760 aa
+  marmoset: U3FHF5   # 760 aa
+
+# Structural domains, from the Lawrence 1999 ectodomain structure.
+# UniProt features do NOT contain these - its table has only a "PA" motif at
+# 225-315 and a "Ligand-binding" region at 572-763, which is why the
+# domain-level swap recommendations were useless. Numbering is human P02786;
+# offsets to mouse are small and handled by ResidueMap.
+domains:
+  - {name: protease-like-N, start: 121, end: 188}
+  - {name: apical,          start: 189, end: 383}
+  - {name: protease-like-C, start: 384, end: 606}
+  - {name: helical,         start: 607, end: 760}
+
+# protease-like-N and protease-like-C are one discontinuous domain in the fold;
+# they are listed separately because a chimera swaps a contiguous stretch.
+domain_aliases:
+  protease-like: [protease-like-N, protease-like-C]
+
+topology:
+  cytoplasmic:   [1, 67]
+  transmembrane: [68, 88]
+  extracellular: [89, 763]     # mouse numbering; 89-760 for human
+
+oligomer: homodimer            # disulfide-linked
+oligomer_interface_domains: [helical]
+
+# Experimental structures. Prefer these over an AlphaFold monomer: they give a
+# real biological assembly for SASA, and a superposition target for
+# --equivalence structural in the low-identity windows.
+#
+# Deliberately NOT auto-selected as --structure: assembly and resolution should
+# be checked first. The report recommends them and says why.
+structures:
+  ectodomain:       1CX8
+  with_transferrin: 1SUV
+
+# Ranked by how evenly each splits the discriminating positions.
+candidate_species:
+  syrian_hamster:  A0A1U7QRP4   # 757 aa, 83.6% id to mouse
+  chinese_hamster: Q07891       # 757 aa, 84.3%, Swiss-Prot reviewed
+  cat:             Q9MYZ3       # 769 aa, 77.8%, reviewed
+  dog:             Q9GLD3       # 770 aa, 77.0%, reviewed
+  guinea_pig:      G4WF79       # 765 aa, 74.6%
+  pig:             Q8HZV3       # 768 aa, 76.3%, reviewed
+  cow:             E1BIG6       # 777 aa, 74.3%
+  rabbit:          G1TCW1       # 763 aa, 77.4%
+  rhesus:          H9EXL1       # 760 aa, 77.1%
+
+# Known-bad entries, so nobody re-picks them. Passing one of these as a
+# sequence or candidate is refused, with the reason.
+avoid:
+  - accession: A0A2K5X958
+    species: cynomolgus
+    reason: >-
+      732 aa, clean 28-residue internal deletion spanning human 532-559 inside
+      the protease-like domain; gene-model gap, not a real isoform
+  - accession: A0AAA9U1C1
+    species: cow
+    reason: 806 aa, extended N-terminal prediction
+
+# Sanity checks applied to whatever sequences are actually loaded.
+identity_guards:
+  - max_identity_to_reference: 70
+    note: >-
+      an ortholog aligning near 50-66% to mouse Q62351 is TFR2, a different
+      gene, not TfR1
+  - description_must_contain: Transferrin receptor protein 1
+    note: >-
+      keyword searches for "transferrin receptor" also return glutamate
+      carboxypeptidase II, which shares the PA-domain fold and will align
+      plausibly enough to poison a run

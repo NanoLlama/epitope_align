@@ -436,24 +436,32 @@ def merged_surfaces(
                 gaps[(a.patch_id, b.patch_id)] = a.min_distance_to(b)
 
     seen: Dict[frozenset, Dict[str, object]] = {}
+    grouped: set = set()
     for seed in sorted(everything, key=lambda p: -p.total_score):
         group = [seed]
         members = list(seed.members)
         while True:
-            best, best_score = None, 0.0
+            best, best_key = None, None
             for candidate in everything:
-                if candidate in group:
+                # compare by identifier: Patch is a dataclass, so `in` would run
+                # a deep field comparison and could match the wrong object
+                if any(candidate.patch_id == p.patch_id for p in group):
                     continue
-                # only consider patches that touch the group at all
-                if min(
+                gap = min(
                     gaps[(candidate.patch_id, member.patch_id)] for member in group
-                ) > footprint_diameter:
-                    continue
+                )
+                if gap > footprint_diameter:
+                    continue  # not a neighbour of this group at all
                 combined = members + candidate.members
-                if _diameter(combined) > footprint_diameter:
+                diameter = _diameter(combined)
+                if diameter > footprint_diameter:
                     continue  # the merge that would breach the footprint is refused
-                if candidate.total_score > best_score:
-                    best, best_score = candidate, candidate.total_score
+                # take the partner that keeps the group tightest, not the
+                # highest-scoring one: a 21 A partner should never be chosen
+                # over a 14 A one that also fits
+                key = (round(diameter, 3), round(gap, 3), -candidate.total_score)
+                if best_key is None or key < best_key:
+                    best, best_key = candidate, key
             if best is None:
                 break
             group.append(best)
@@ -461,6 +469,7 @@ def merged_surfaces(
 
         if len(group) < 2:
             continue
+        grouped.update(p.patch_id for p in group)
         key = frozenset(p.patch_id for p in group)
         if key in seen:
             continue
@@ -472,6 +481,7 @@ def merged_surfaces(
         area = sum(m.sasa for m in residues if m.sasa == m.sasa)
         seen[key] = {
             "patches": sorted(p.patch_id for p in group),
+            "grown_from": seed.patch_id,
             "n_residues": len(residues),
             "verdict": _surface_verdict(residues, _diameter(residues), area),
             "residues": [m.ref_number or str(m.ref_index + 1) for m in residues],
@@ -490,7 +500,47 @@ def merged_surfaces(
         }
 
     out = sorted(seen.values(), key=lambda entry: -float(entry["total_score"]))
-    return out[:max_groups]
+    out = out[:max_groups]
+
+    # nothing may vanish: a patch that joins no group is reported as its own
+    # candidate surface, with why. Silently omitting it hid the top-ranked patch.
+    for patch in sorted(everything, key=lambda p: -p.total_score):
+        if patch.patch_id in grouped or any(
+            patch.patch_id in entry["patches"] for entry in out
+        ):
+            continue
+        nearest = min(
+            (
+                (gaps[(patch.patch_id, other.patch_id)], other.patch_id)
+                for other in everything
+                if other.patch_id != patch.patch_id
+            ),
+            default=(float("inf"), ""),
+        )
+        residues = sorted(patch.members, key=lambda m: m.ref_index)
+        area = sum(m.sasa for m in residues if m.sasa == m.sasa)
+        reason = (
+            f"nearest patch {nearest[1]} is {nearest[0]:.0f} A away and merging "
+            f"would exceed the {footprint_diameter:.0f} A footprint"
+            if nearest[0] <= footprint_diameter
+            else f"nearest patch {nearest[1]} is {nearest[0]:.0f} A away"
+            if nearest[1]
+            else "no other patch to group with"
+        )
+        out.append(
+            {
+                "patches": [patch.patch_id],
+                "grown_from": patch.patch_id,
+                "n_residues": len(residues),
+                "verdict": f"stands alone - {reason}",
+                "residues": [m.ref_number or str(m.ref_index + 1) for m in residues],
+                "total_score": patch.total_score,
+                "accessible_area_A2": area,
+                "spread_A": _diameter(residues),
+                "max_gap_A": 0.0,
+            }
+        )
+    return out
 
 
 def _diameter(members: Sequence[ResidueAnalysis]) -> float:
