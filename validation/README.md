@@ -67,6 +67,26 @@ list.
 Its binding table ships with two species only, which is not a validated
 cross-species panel - see the comments in the YAML before using it as one.
 
+## What the first real run added
+
+Running v0.1.0 against mouse TfR1 (Q62351) vs rat / human / marmoset on
+`AF-Q62351-F1` produced a defensible top hit and a large amount of artifact
+alongside it. The regression tests below now cover each failure:
+
+| failure on the real target | test |
+|---|---|
+| rank-2 patch entirely cytoplasmic | `test_intracellular_residues_never_reach_a_patch` |
+| two of three "differential sequons" in the cytoplasmic tail | `test_sequons_outside_the_extracellular_range_are_rejected_and_counted` |
+| six patches from a 32-residue disordered stalk | `test_disordered_stalk_does_not_produce_a_top_patch` |
+| one apical surface split across four entries | `test_groups_20A_apart_separate_at_12A_and_merge_at_18A`, `test_min_distance_beats_centroid_separation_for_elongated_patches` |
+| highest-scoring residue in the run filed as a low-priority singleton | `test_isolated_indel_is_promoted_not_buried` |
+| point mutants named from an ambiguous alignment window | `test_confidence_is_lower_in_the_ambiguous_window`, `test_unverified_mutants_are_marked_and_deprioritised` |
+| offset shifting mid-patch with nothing verifying it | `test_equivalences_round_trip_across_an_indel` |
+| enrichment quoted to two decimals off six labellings | `test_enrichment_is_withheld_for_a_small_panel` |
+
+`examples/tfr1.yaml` is the configuration that run should have used. It needs
+network access, so it has not been executed here either.
+
 ## Metrics reported
 
 * **hit in top 1 / top 3** - does the top-ranked (or any of the top three)

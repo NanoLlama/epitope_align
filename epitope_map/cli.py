@@ -183,6 +183,22 @@ def _load_config_file(path: Path) -> Dict[str, object]:
     return {str(k).replace("-", "_"): v for k, v in data.items()}
 
 
+def _sequences_value(value) -> str:
+    """Accept ``label=ACC,label=ACC``, a path, or a YAML mapping of the same.
+
+    Writing the panel as a mapping is the natural thing to do in a config file::
+
+        sequences:
+          mouse: Q62351
+          human: P02786
+    """
+    if isinstance(value, dict):
+        return ",".join(f"{label}={accession}" for label, accession in value.items())
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+
 def _split_list(value) -> List[str]:
     if not value:
         return []
@@ -238,17 +254,25 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         ectodomain = (int(ectodomain[0]), int(ectodomain[1]))
 
     return RunConfig(
-        sequences=str(values["sequences"]),
+        sequences=_sequences_value(values["sequences"]),
         binding=str(values["binding"]),
         reference=str(values["reference"]),
         structure=str(values["structure"]),
         topology=str(values["topology"]) if values.get("topology") else None,
         domains=str(values["domains"]) if values.get("domains") else None,
-        keep_disordered=bool(values.get("keep_disordered", False)),
+        keep_disordered=(
+            not bool(values["disordered_region_exclusion"])
+            if "disordered_region_exclusion" in values
+            else bool(values.get("keep_disordered", False))
+        ),
         equivalence=str(values.get("equivalence", "sequence")),
         species_structures=_split_list(values.get("species_structure")),
         radius_sweep=[float(r) for r in _split_list(values.get("radius_sweep"))],
-        prefer_assembly=not bool(values.get("no_assembly", False)),
+        prefer_assembly=(
+            str(values["assembly"]).strip().lower().startswith("bio")
+            if values.get("assembly")
+            else not bool(values.get("no_assembly", False))
+        ),
         outdir=Path(values.get("outdir", "results")),
         ectodomain=ectodomain,
         ectodomain_numbering=str(values.get("ectodomain_numbering", "structure")),

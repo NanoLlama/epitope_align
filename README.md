@@ -76,6 +76,24 @@ a 4-character PDB ID, or an AlphaFold DB accession; the latter two are fetched
 and cached. Every flag can also live in a `--config run.yaml`, and anything on
 the command line overrides the file, so a run can be repeated with one tweak.
 
+### Topology is required
+
+An antibody reaches the outside of a cell and nothing else. Without knowing
+which part of the chain faces outwards the tool would happily rank a
+cytoplasmic patch first, so it **refuses to run** rather than defaulting to the
+whole chain:
+
+```
+--topology extracellular=121-763,tm=68-88,cytoplasmic=1-67
+--ectodomain 121-763        # treated as the extracellular range
+--topology whole-chain      # a soluble protein, or an ectodomain-only construct
+```
+
+Fetch the sequences by UniProt accession and none of that is needed: the
+topology is read from the entry's `TOPO_DOM` / `TRANSMEM` features, along with
+its domain annotation, oligomeric state and the experimental structures that
+exist for the target.
+
 ### Binding calls
 
 ```csv
@@ -94,10 +112,13 @@ reference must be a binder - numbering and structure are anchored to it.
 
 | file | contents |
 |---|---|
-| `residues.tsv` | one row per reference residue: per-species residue, discrimination, Grantham severity, RSA, pLDDT, glycosylation flag, the three composite factors kept separate, mask reasons, patch ID |
-| `patches.tsv` | ranked patches: members, centroid, scores, mean RSA, max Grantham, spread, accessible area, flags, rationale - singletons included and labelled |
-| `chimeras.tsv` | suggested domain-swap segments, one row per segment |
-| `mutants.tsv` | reciprocal point mutants, both directions, each numbered in its own background |
+| `residues.tsv` | one row per reference residue: per-species residue, discrimination, Grantham severity, RSA, pLDDT, topology, domain, alignment confidence, local identity, glycosylation flag, the three composite factors kept separate, mask reasons, patch ID |
+| `regions.tsv` | per-region enrichment against the whole-chain baseline: which domain, topology segment or disordered run the divergence actually sits in |
+| `patches.tsv` | ranked patches with their conserved surface context and their neighbours; promoted isolated residues and singletons labelled as such |
+| `chimeras.tsv` | suggested domain-swap segments, one row per segment, with a constructibility verdict |
+| `mutants.tsv` | reciprocal point mutants, both directions, each numbered in its own background, marked where the residue equivalence behind them is not reliable |
+| `radius_sensitivity.tsv` | which patches merge at which clustering radius (with `--radius-sweep`) |
+| `divergence.svg` | discrimination along the chain with domains, disordered regions and top patches marked |
 | `report.md` | run parameters, alignment stats, how much signal there is, the narrowing table, top patches, glycosylation, next experiments, warnings, caveats |
 | `session.pml` | PyMOL session: composite score painted white to red, top patches coloured, view set |
 | `alignment.fasta` | the MSA actually used |
@@ -140,8 +161,37 @@ reference must be a binder - numbering and structure are anchored to it.
    Patches are ranked raw and normalized, flagged against the 15-22 residue,
    600-900 A^2 envelope of a real conformational epitope.
 9. **Experiments** (`suggest.py`) - domain-swap segments that isolate each patch,
-   and reciprocal mutants with the gain-of-binding direction prioritised, since
-   loss of binding alone can be generic misfolding.
+   checked for constructibility, with a whole-domain alternative where the patch
+   sits in one annotated domain; and reciprocal mutants with the gain-of-binding
+   direction prioritised, since loss of binding alone can be generic misfolding.
+
+### What the first real run changed
+
+Running this against mouse TfR1 produced a defensible top hit and roughly half a
+report of artifact, none of it distinguishable from signal without knowing the
+target. Everything below exists because of that run:
+
+- **Topology is enforced** (above). The rank-2 patch was entirely cytoplasmic
+  and carried the highest Grantham score in the run.
+- **Sequons are checked against topology.** Two of three "differential
+  glycosylation sites" were in the cytoplasmic tail, where N-glycosylation does
+  not happen, and both had propagated proximity flags onto neighbours.
+- **Disordered regions are excluded** (`structure.py`): contiguous runs of >=10
+  residues averaging pLDDT < 50 are a modelling failure, not a surface. The
+  stalk showed 70% of positions discriminating against a 27% baseline on the
+  synthetic reproduction, purely from being unconstrained.
+- **Fragmentation is visible.** Patches carry conserved surface context, their
+  nearest-member distances, and a merged-surfaces section; `--radius-sweep`
+  shows which fragments are one surface.
+- **Isolated residues are not buried.** A high-scoring surface insertion is
+  promoted rather than filed under leftovers.
+- **Alignment reliability is measured** (`align.py`), and point mutants resting
+  on an unreliable residue equivalence are marked UNVERIFIED. This is the
+  failure that costs money: the region is right, the construct is wrong.
+- **The report is reordered** so what was excluded, how much signal there is,
+  the warnings and the region table all come before the rankings.
+- **The enrichment figure is withheld** below six scored species instead of
+  being quoted to two decimals off a handful of relabellings.
 
 ## Defaults worth knowing
 
@@ -152,6 +202,10 @@ reference must be a binder - numbering and structure are anchored to it.
 | `--patch-radius` | 12.0 A | between side-chain centroids |
 | `--min-patch-size` | 2 | smaller clusters are reported as singletons |
 | `--glycan-radius` | 12.0 A | how far a glycan is assumed to reach |
+| `--topology` | from UniProt | required; `whole-chain` opts out explicitly |
+| `--keep-disordered` | off | long low-pLDDT regions do not seed patches |
+| `--radius-sweep` | off | e.g. `10,12,14,16,18` |
+| `--equivalence` | `sequence` | `structural` with `--species-structure` |
 | `--ectodomain-numbering` | `structure` | or `sequence` for 1-based reference positions |
 | `--mismatch-tolerance` | 0.05 | sequence/structure disagreement before the run stops |
 
@@ -205,6 +259,11 @@ python validation/benchmark.py scaling
 suite and the examples: a packed-ball structure with a buried core, insertion
 codes, unmodelled residues, a numbering offset, a differential glycosylation
 sequon, an indel, and a planted spatially clustered epitope.
+
+## Worked configuration
+
+`examples/tfr1.yaml` is the configuration the first real run should have used,
+with a comment on every option explaining which artifact it prevents.
 
 ## Not implemented
 

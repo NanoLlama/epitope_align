@@ -179,3 +179,40 @@ def test_topology_flag_is_parsed_into_the_config(synthetic_inputs, tmp_path):
     config = config_from_args(args)
     assert config.topology == "extracellular=90-763,tm=68-88"
     assert config.radius_sweep == [10.0, 14.0, 18.0]
+
+
+def test_sequences_may_be_written_as_a_mapping(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    path = tmp_path / "run.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "sequences": {"mouse": "Q62351", "human": "P02786"},
+                "binding": "b.csv",
+                "reference": "mouse",
+                "structure": "AF-Q62351-F1",
+                "topology": "cytoplasmic=1-67,tm=68-88,extracellular=89-763",
+                "disordered_region_exclusion": True,
+                "assembly": "biological",
+                "radius_sweep": "10,12,14",
+            }
+        )
+    )
+    config = config_from_args(build_parser().parse_args(["--config", str(path)]))
+    # YAML mappings do not preserve order, and nothing downstream depends on it
+    assert set(config.sequences.split(",")) == {"mouse=Q62351", "human=P02786"}
+    assert config.topology.startswith("cytoplasmic=1-67")
+    assert config.keep_disordered is False
+    assert config.prefer_assembly is True
+    assert config.radius_sweep == [10.0, 12.0, 14.0]
+
+
+def test_shipped_tfr1_config_parses():
+    """The worked configuration for the target the change requests came from."""
+    config = config_from_args(
+        build_parser().parse_args(["--config", "examples/tfr1.yaml"])
+    )
+    assert "mouse=Q62351" in config.sequences
+    assert config.reference == "mouse"
+    assert "extracellular=89-763" in config.topology
+    assert config.radius_sweep == [10.0, 12.0, 14.0, 16.0, 18.0]

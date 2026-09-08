@@ -1,0 +1,53 @@
+# Transferrin receptor 1: mouse and rat bind, human and marmoset do not.
+#
+# This is the configuration the first real run should have used. It is written
+# out here because every option in it exists because that run went wrong without
+# it - see the comments.
+#
+#   epitope-map --config examples/tfr1.yaml
+#
+# Needs network access (UniProt and AlphaFold DB).
+
+sequences:
+  mouse: Q62351
+  rat: Q99376
+  human: P02786
+  marmoset: U3FHF5
+
+binding: examples/tfr1_binding.csv
+reference: mouse
+structure: AF-Q62351-F1
+chain: A
+
+# Topology. Without this the run stops: TfR1 is a type-II membrane protein with
+# a 67-residue cytoplasmic tail and a transmembrane helix, and scoring those
+# gave a confident-looking rank-2 patch no antibody can reach, plus two
+# "differential glycosylation sequons" in the cytoplasm.
+#
+# Leave it out entirely and it is read from the UniProt entry automatically,
+# since the sequences above are accessions. Written out explicitly:
+topology: cytoplasmic=1-67,tm=68-88,extracellular=89-763
+
+# The 89-120 stalk is disordered in the AlphaFold model (mean pLDDT ~35) and the
+# least constrained part of the protein, so it looks discriminating everywhere
+# and its RSA is meaningless. Excluded by default; this says so explicitly.
+disordered_region_exclusion: true
+
+# The apical surface came back split across several patches at 12 A. The sweep
+# shows which of them are one surface.
+patch_radius: 12
+radius_sweep: 10,12,14,16,18
+
+rsa_cutoff: 0.20
+min_patch_size: 2
+top_n: 5
+
+# TfR1 is an obligate disulfide-linked homodimer, so a monomer model reports the
+# dimer interface as exposed. With an experimental structure, pass the chains of
+# the partner here instead:
+# context_chains: B
+
+# With a human TfR1 structure to hand, derive residue equivalences from 3D
+# rather than from the aligner's guess in the 195-235 loop:
+# equivalence: structural
+# species_structure: human=AF-P02786-F1
