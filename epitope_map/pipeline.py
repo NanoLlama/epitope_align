@@ -16,6 +16,11 @@ from .align import (
     alignment_confidence,
     local_identity,
 )
+from .equivalence import (
+    StructuralEquivalence,
+    load_species_structures,
+    structural_equivalence,
+)
 from .glycan import DEFAULT_GLYCAN_RADIUS, GlycanAnalysis, analyse_glycosylation
 from .io_seq import Dataset, InputError, build_dataset, load_binding_calls, load_sequences
 from .patches import (
@@ -40,10 +45,13 @@ from .score import (
     composite_score,
     score_alignment,
 )
-from .structure import StructureModel, load_structure
+from .structure import StructureError, StructureModel, load_structure
 from .topology import (
+    AssemblyEvidence,
     Segment,
     Topology,
+    assembly_evidence,
+    assembly_warnings,
     domain_at,
     load_domains_tsv,
     parse_topology_spec,
@@ -70,6 +78,8 @@ class RunConfig:
     topology: Optional[str] = None
     domains: Optional[str] = None
     keep_disordered: bool = False
+    equivalence: str = "sequence"
+    species_structures: List[str] = field(default_factory=list)
     radius_sweep: List[float] = field(default_factory=list)
     prefer_assembly: bool = True
     chain: Optional[str] = None
@@ -127,6 +137,8 @@ class RunResult:
     radius_sensitivity: List[Dict[str, object]] = field(default_factory=list)
     merged_surfaces: List[Dict[str, object]] = field(default_factory=list)
     promoted_singletons: List[Patch] = field(default_factory=list)
+    equivalences: Dict[str, StructuralEquivalence] = field(default_factory=dict)
+    assembly: AssemblyEvidence = field(default_factory=AssemblyEvidence)
     panel_advice: List[Dict[str, object]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     version: str = __version__
@@ -440,11 +452,68 @@ def run_pipeline(config: RunConfig) -> RunResult:
             method=config.cluster_method,
             rsa_cutoff=config.rsa_cutoff,
         )
+    equivalences: Dict[str, StructuralEquivalence] = {}
+    equivalence_warnings: List[str] = []
+    if config.species_structures:
+        try:
+            structures = load_species_structures(
+                config.species_structures, cache_dir=config.cache_dir
+            )
+        except (ValueError, StructureError) as exc:
+            equivalence_warnings.append(f"--species-structure ignored: {exc}")
+            structures = {}
+        for species, model in structures.items():
+            if species not in alignment.sequences:
+                equivalence_warnings.append(
+                    f"--species-structure names {species!r}, which is not one of "
+                    f"the aligned species ({', '.join(alignment.sequences)})"
+                )
+                continue
+            equivalence = structural_equivalence(
+                residue_map, structure, species, model
+            )
+            equivalence_warnings.extend(equivalence.warnings)
+            if equivalence.usable:
+                equivalences[species] = equivalence
+        if config.equivalence == "structural" and not equivalences:
+            equivalence_warnings.append(
+                "--equivalence structural was requested but no usable "
+                "superposition was obtained; sequence equivalences were used"
+            )
+    elif config.equivalence == "structural":
+        equivalence_warnings.append(
+            "--equivalence structural needs a structure for at least one "
+            "non-binder; pass --species-structure human=AF-P02786-F1"
+        )
+
+    reference_record = dataset.get(reference)
+    evidence = (
+        assembly_evidence(reference_record.features)
+        if reference_record.features
+        else AssemblyEvidence()
+    )
+    assembly_notes = assembly_warnings(
+        evidence,
+        is_alphafold=structure.is_alphafold,
+        context_supplied=bool(config.context_chains or config.assembly_context),
+    )
+
     advice = panel_advice(
         residue_map, dataset, cutoff=config.discrimination_cutoff, accessible=accessible
     )
     chimeras = suggest_chimeras(patches, rows, residue_map, structure, top_n=config.top_n)
-    mutants = suggest_mutants(patches, dataset, residue_map, top_n=config.top_n)
+    mutants = suggest_mutants(
+        patches,
+        dataset,
+        residue_map,
+        top_n=config.top_n,
+        equivalences={
+            species: eq.mapping
+            for species, eq in equivalences.items()
+        }
+        if config.equivalence == "structural"
+        else None,
+    )
     counts = baseline_counts(rows, config.discrimination_cutoff)
 
     if topology.known and not topology.whole_chain:
@@ -483,6 +552,8 @@ def run_pipeline(config: RunConfig) -> RunResult:
 
     warnings_ = (
         warnings_topology
+        + assembly_notes
+        + equivalence_warnings
         + confidence_notes
         + list(dataset.warnings)
         + list(alignment.warnings)
@@ -519,5 +590,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
         merged_surfaces=surfaces,
         promoted_singletons=promoted,
         panel_advice=advice,
+        equivalences=equivalences,
+        assembly=evidence,
         warnings=warnings_,
     )

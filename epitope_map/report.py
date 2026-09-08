@@ -745,6 +745,29 @@ def _promoted_section(result: RunResult) -> str:
     return "\n".join(lines)
 
 
+def _equivalence_section(result: RunResult) -> str:
+    if not result.equivalences:
+        return ""
+    lines = [
+        "",
+        "### Residue equivalences from structure",
+        "",
+    ]
+    for species, equivalence in result.equivalences.items():
+        lines.append(
+            f"- {species}: superposed over {equivalence.n_superposed} residues at "
+            f"{equivalence.rmsd:.2f} A RMSD; "
+            + (
+                f"the alignment names a different residue at "
+                f"{len(equivalence.disagreements)} position(s), where the "
+                "structural pairing was used instead"
+                if equivalence.disagreements
+                else "the alignment agrees everywhere it could be checked"
+            )
+        )
+    return "\n".join(lines)
+
+
 def _advice_section(result: RunResult) -> str:
     if not result.panel_advice:
         return "No panel advice could be computed.\n"
@@ -1042,6 +1065,7 @@ for a species-specific loss of binding on its own.
 ### Which species to test next
 
 {_advice_section(result)}
+{_equivalence_section(result)}
 
 ## 8. Caveats that apply to every run
 

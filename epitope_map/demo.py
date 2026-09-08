@@ -343,3 +343,46 @@ def truth_numbers() -> List[str]:
         code = icode.strip()
         out.append(f"{resseq}{code}" if code else str(resseq))
     return out
+
+
+def write_species_structure(
+    path: Path, species: str = "human", shift: int = 0, first: int = 0
+) -> Path:
+    """A toy structure for another species, on the same fold as the reference.
+
+    Same coordinates (the fold is conserved, as it is between real orthologs),
+    that species' own sequence, and its own numbering - which is what makes it a
+    fair test of deriving equivalences from geometry instead of from the
+    alignment. ``shift`` renumbers the file and ``first`` truncates the modelled
+    region, the two ways real structures differ from their sequence entries.
+    """
+    seqs, _ = species_sequences()
+    sequence = seqs[species]
+    coords = coordinates()
+    lines: List[str] = ["HEADER    SYNTHETIC ORTHOLOG STRUCTURE"]
+    serial = 1
+    for index, aa in enumerate(sequence):
+        if index not in coords or index < first:
+            continue
+        x, y, z = coords[index]
+        atoms = [
+            ("N", (x - 1.2, y, z)),
+            ("CA", (x, y, z)),
+            ("C", (x + 1.2, y, z)),
+            ("O", (x + 1.6, y + 1.0, z)),
+        ]
+        if aa != "G":
+            direction = _unit((x, y, z))
+            atoms.append(
+                ("CB", (x + direction[0] * 1.6, y + direction[1] * 1.6,
+                        z + direction[2] * 1.6))
+            )
+        for name, (ax, ay, az) in atoms:
+            lines.append(
+                f"ATOM  {serial:5d}  {name:<3s}{THREE[aa]:>4s} B{index + 1 + shift:4d} "
+                f"   {ax:8.3f}{ay:8.3f}{az:8.3f}  1.00 80.00          {name[0]:>2s}"
+            )
+            serial += 1
+    lines.append("END")
+    path.write_text("\n".join(lines) + "\n")
+    return path

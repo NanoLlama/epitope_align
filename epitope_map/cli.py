@@ -105,6 +105,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use the asymmetric unit rather than biological assembly 1 for PDB IDs",
     )
+    parser.add_argument(
+        "--equivalence",
+        choices=("sequence", "structural"),
+        default="sequence",
+        help="how residue equivalences behind point mutants are derived. "
+        "'structural' superposes the supplied non-binder structures and takes "
+        "the spatially nearest residue, which is more reliable than sequence "
+        "alignment in indel-bearing loops; needs --species-structure",
+    )
+    parser.add_argument(
+        "--species-structure",
+        action="append",
+        default=[],
+        metavar="SPECIES=STRUCTURE",
+        help="structure of another species, e.g. 'human=AF-P02786-F1'. Repeatable",
+    )
     parser.add_argument("--chain", help="chain ID (default: first protein chain)")
     parser.add_argument(
         "--assembly-context",
@@ -229,6 +245,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         topology=str(values["topology"]) if values.get("topology") else None,
         domains=str(values["domains"]) if values.get("domains") else None,
         keep_disordered=bool(values.get("keep_disordered", False)),
+        equivalence=str(values.get("equivalence", "sequence")),
+        species_structures=_split_list(values.get("species_structure")),
         radius_sweep=[float(r) for r in _split_list(values.get("radius_sweep"))],
         prefer_assembly=not bool(values.get("no_assembly", False)),
         outdir=Path(values.get("outdir", "results")),

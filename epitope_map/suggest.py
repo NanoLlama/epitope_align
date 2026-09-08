@@ -328,6 +328,7 @@ def suggest_mutants(
     residue_map: ResidueMap,
     top_n: int = 5,
     max_per_patch: int = 12,
+    equivalences: Optional[Dict[str, Dict[int, int]]] = None,
 ) -> List[MutantSuggestion]:
     """List reference->non-binder substitutions and their reciprocals.
 
@@ -390,6 +391,13 @@ def suggest_mutants(
                 )
                 for species in species_list:
                     position = residue_map.species_index(species, member.ref_index)
+                    structural = (equivalences or {}).get(species, {}).get(
+                        member.ref_index
+                    )
+                    if structural is not None:
+                        # geometry beats the aligner's guess in exactly the loops
+                        # where the two disagree
+                        position = structural
                     per_patch.append(
                         MutantSuggestion(
                             patch_id=patch.patch_id,

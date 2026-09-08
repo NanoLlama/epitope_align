@@ -318,3 +318,119 @@ def require_topology(
         "Fetching the sequences from UniProt accessions lets the topology be "
         "read from the entry's TOPO_DOM/TRANSMEM features automatically."
     )
+
+
+# --------------------------------------------------------------------------
+# oligomeric state and experimental templates
+# --------------------------------------------------------------------------
+
+_OLIGOMER_WORDS = (
+    "homodimer",
+    "homotrimer",
+    "homotetramer",
+    "homooligomer",
+    "homo-oligomer",
+    "homohexamer",
+    "disulfide-linked dimer",
+    "disulfide-linked homodimer",
+)
+
+
+@dataclass
+class AssemblyEvidence:
+    """What UniProt says about oligomeric state, and which structures exist."""
+
+    oligomeric: bool = False
+    subunit_text: str = ""
+    templates: List[Dict[str, str]] = field(default_factory=list)
+
+    @property
+    def best_template(self) -> Optional[Dict[str, str]]:
+        experimental = [t for t in self.templates if t.get("resolution")]
+        if not experimental:
+            return self.templates[0] if self.templates else None
+        return min(
+            experimental,
+            key=lambda t: float(str(t["resolution"]).split()[0] or 99),
+        )
+
+
+def assembly_evidence(payload: dict) -> AssemblyEvidence:
+    """Read oligomeric state and PDB cross-references out of a UniProt entry.
+
+    Both come from the entry already fetched for the sequence, so this costs no
+    extra network call. An AlphaFold monomer of an obligate dimer reports its
+    dimer interface as solvent-exposed, and for a well-studied target an
+    experimental structure beats a predicted one - the tool should say so rather
+    than silently using whatever it was handed.
+    """
+    evidence = AssemblyEvidence()
+
+    for comment in payload.get("comments", []) or []:
+        if str(comment.get("commentType", "")).upper() != "SUBUNIT":
+            continue
+        for text in comment.get("texts", []) or []:
+            value = str(text.get("value", ""))
+            evidence.subunit_text = (evidence.subunit_text + " " + value).strip()
+    lowered = evidence.subunit_text.lower()
+    evidence.oligomeric = any(word in lowered for word in _OLIGOMER_WORDS)
+
+    for reference in payload.get("uniProtKBCrossReferences", []) or []:
+        if str(reference.get("database", "")) != "PDB":
+            continue
+        entry = {"pdb_id": str(reference.get("id", ""))}
+        for prop in reference.get("properties", []) or []:
+            key = str(prop.get("key", "")).lower()
+            value = str(prop.get("value", ""))
+            if key == "method":
+                entry["method"] = value
+            elif key == "resolution":
+                entry["resolution"] = value
+            elif key == "chains":
+                entry["chains"] = value
+        evidence.templates.append(entry)
+
+    return evidence
+
+
+def assembly_warnings(
+    evidence: AssemblyEvidence, is_alphafold: bool, context_supplied: bool
+) -> List[str]:
+    """Say plainly when the surface being measured is the wrong one."""
+    messages: List[str] = []
+    if evidence.oligomeric and is_alphafold and not context_supplied:
+        messages.append(
+            "UniProt describes this protein as an oligomer "
+            f"(\"{evidence.subunit_text[:200]}\"), but the structure is a predicted "
+            "monomer, so residues at the oligomer interface are reported here as "
+            "solvent-exposed when they are not. Supply the assembly with "
+            "--assembly-context / --context-chains, or use an AlphaFold-Multimer "
+            "or experimental structure."
+        )
+    elif evidence.oligomeric and not context_supplied:
+        messages.append(
+            "UniProt describes this protein as an oligomer; if the structure "
+            "supplied is a single chain, pass --context-chains so interface "
+            "residues are masked rather than counted as exposed."
+        )
+    if evidence.templates and is_alphafold:
+        best = evidence.best_template
+        described = ", ".join(
+            f"{t['pdb_id']}"
+            + (f" ({t.get('method', '?')}" if t.get("method") else "")
+            + (f", {t['resolution']}" if t.get("resolution") else "")
+            + (")" if t.get("method") else "")
+            for t in evidence.templates[:6]
+        )
+        messages.append(
+            f"{len(evidence.templates)} experimental structure(s) of this protein "
+            f"exist in the PDB: {described}"
+            + (" ..." if len(evidence.templates) > 6 else "")
+            + (
+                f". For a well-studied target an experimental structure beats a "
+                f"prediction - consider --structure {best['pdb_id']}"
+                if best
+                else ""
+            )
+        )
+    return messages
