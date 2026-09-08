@@ -234,6 +234,11 @@ your structure in PyMOL with the candidate patches coloured in.
 
 ## If something goes wrong
 
+**"No module named 'epitope_map.notebook'"** (or any other missing part of the
+package) — the Colab runtime is holding an older copy of the tool than the
+notebook expects. Re-run **Step 1**; it now forces a fresh install. If it still
+complains, choose **Runtime → Restart session** and run Step 1 again.
+
 **"command not found: epitope-map"** — the install did not finish, or a new
 terminal window lost it. Re-run `pip install -e .` from inside the project
 folder.
