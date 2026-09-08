@@ -269,8 +269,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(
                 "\nInstallation looks healthy. Open "
                 f"{paths['report']} to see the kind of write-up a real run "
-                "produces, then read GETTING_STARTED.md to assemble your own "
-                "inputs."
+                "produces, then follow the guide at "
+                "https://github.com/NanoLlama/epitope_align/blob/main/"
+                "GETTING_STARTED.md to assemble your own inputs."
             )
     return 0
 

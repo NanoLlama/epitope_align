@@ -15,12 +15,20 @@ surface patches** with the experiments that would test them.
 The output is a hypothesis list for chimera and point-mutant design. It is not a
 prediction of the epitope, and the report says so in every run.
 
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/NanoLlama/epitope_align/blob/claude/antibody-epitope-identification-ervnyf/notebooks/epitope_mapping.ipynb)
+
 **Not a programmer?** Start with
 [GETTING_STARTED.md](GETTING_STARTED.md) — it walks through running this in a
 browser via Google Colab (`notebooks/epitope_mapping.ipynb`, nothing to install)
 or on your own machine, what to gather, and how to read the output.
 
 ## Install
+
+```bash
+pip install "git+https://github.com/NanoLlama/epitope_align.git@claude/antibody-epitope-identification-ervnyf"
+```
+
+or, from a clone:
 
 ```bash
 pip install -e .          # Python 3.11+

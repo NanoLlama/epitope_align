@@ -13,22 +13,24 @@ There are two ways to run it. Pick one.
 Nothing to install. Colab is a free Google service that runs code on Google's
 computers; you only ever press play buttons and fill in boxes.
 
-1. **Get the code.** Open
-   <https://github.com/NanoLlama/epitope_align>, switch the branch dropdown to
-   `claude/antibody-epitope-identification-ervnyf`, click the green **Code**
-   button, then **Download ZIP**. Keep that file where you can find it.
-2. **Get the notebook.** In that same repository, open
-   `notebooks/epitope_mapping.ipynb` and download it (the download button is at
-   the top right of the file view).
-3. **Open Colab.** Go to <https://colab.research.google.com>, choose
-   **Upload**, and pick the notebook file you just downloaded.
-4. **Work down the notebook**, pressing ▶ on each grey box in order. The first
-   one asks you for the ZIP from step 1; the second runs a built-in example so
-   you can confirm everything works before using your own data.
+**[▶ Open the notebook in Colab](https://colab.research.google.com/github/NanoLlama/epitope_align/blob/claude/antibody-epitope-identification-ervnyf/notebooks/epitope_mapping.ipynb)**
 
-The notebook explains each box as you reach it. Because it runs on Google's
-machines it has internet access, so it can fetch sequences from UniProt and
-structures from AlphaFold or the Protein Data Bank for you.
+Then work down the page, pressing ▶ on each grey box in order. The first one
+installs the tool (about two minutes); the second runs a built-in example so you
+can confirm everything works before using your own data; the rest are boxes you
+type your own species and structure into.
+
+You will need a Google account, and Colab will ask you to confirm before running
+a notebook it did not write — that prompt is normal.
+
+*If the link does not open:* go to <https://colab.research.google.com>, choose
+**File → Open notebook → GitHub**, paste `NanoLlama/epitope_align`, pick the
+branch `claude/antibody-epitope-identification-ervnyf`,
+and choose `notebooks/epitope_mapping.ipynb`.
+
+Because Colab runs on Google's machines it has internet access, so it can fetch
+sequences from UniProt and structures from AlphaFold or the Protein Data Bank
+for you.
 
 ---
 
@@ -46,15 +48,18 @@ You need Python 3.11 or newer.
 Then, in that terminal window, one line at a time:
 
 ```bash
+pip install "git+https://github.com/NanoLlama/epitope_align.git@claude/antibody-epitope-identification-ervnyf"
+```
+
+That single line is enough to get the `epitope-map` command. If you would rather
+have the source too (for the examples and tests):
+
+```bash
 git clone https://github.com/NanoLlama/epitope_align.git
 cd epitope_align
 git checkout claude/antibody-epitope-identification-ervnyf
 pip install -e .
 ```
-
-(No `git`? Download the ZIP from GitHub as in Route A, unzip it, and in the
-terminal type `cd ` followed by dragging the unzipped folder onto the window,
-then press enter and run the `pip install -e .` line.)
 
 Check it worked:
 
