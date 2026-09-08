@@ -96,3 +96,38 @@ def test_unverified_mutants_are_marked_and_deprioritised():
     assert "swap the segment" in _reliability(shaky)[1]
     assert _reliability(loose)[0] is True
     assert "local identity 41%" in _reliability(loose)[1]
+
+
+def test_patch_containing_ambiguous_columns_is_flagged():
+    """A patch is a region-level claim; its residue pairings may still be guesses."""
+    from epitope_map.patches import find_patches
+    from epitope_map.score import ResidueAnalysis
+
+    def residue(index, confidence):
+        row = ResidueAnalysis(
+            ref_index=index,
+            column=index,
+            aa="K",
+            ref_number=str(index + 1),
+            discrimination=0.8,
+            modelled=True,
+            centroid=(index * 3.0, 0.0, 0.0),
+            rsa=0.5,
+            alignment_confidence=confidence,
+        )
+        row.composite = 0.8
+        return row
+
+    clean, _ = find_patches(
+        [residue(i, 1.0) for i in range(3)], discrimination_cutoff=0.25, radius=12.0
+    )
+    assert not any("ambiguous" in flag for flag in clean[0].flags)
+
+    shaky, _ = find_patches(
+        [residue(0, 1.0), residue(1, 0.4), residue(2, 0.5)],
+        discrimination_cutoff=0.25,
+        radius=12.0,
+    )
+    flag = next(f for f in shaky[0].flags if "ambiguous" in f)
+    assert "2 of 3" in flag
+    assert "swap the segment" in flag

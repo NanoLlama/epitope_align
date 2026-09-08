@@ -160,6 +160,15 @@ def patches_dataframe(result: RunResult, patches: Optional[Sequence[Patch]] = No
                 "spread_A": _fmt(patch.spread, 1),
                 "n_indels": patch.n_indels,
                 "n_glycan_flagged": patch.n_glycan_flagged,
+                "n_low_confidence_alignment": sum(
+                    1
+                    for m in patch.members
+                    if (
+                        m.alignment_confidence == m.alignment_confidence
+                        and m.alignment_confidence < 0.7
+                    )
+                    or m.low_identity_window
+                ),
                 "centroid_x": _fmt(centroid[0], 2),
                 "centroid_y": _fmt(centroid[1], 2),
                 "centroid_z": _fmt(centroid[2], 2),

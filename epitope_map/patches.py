@@ -520,6 +520,25 @@ def _annotate(patch: Patch) -> None:
     if all(m.involves_gap for m in patch.members):
         patch.flags.append("every member is an indel position - interpret with care")
 
+    shaky = [
+        m
+        for m in patch.members
+        if (
+            m.alignment_confidence == m.alignment_confidence
+            and m.alignment_confidence < 0.7
+        )
+        or m.low_identity_window
+    ]
+    if shaky:
+        patch.flags.append(
+            f"{len(shaky)} of {patch.size} member(s) sit where the alignment is "
+            "ambiguous ("
+            + ", ".join(m.ref_number or str(m.ref_index + 1) for m in shaky[:6])
+            + "): the region is a real candidate but the specific residue "
+            "equivalences are not, so swap the segment rather than ordering point "
+            "mutants there"
+        )
+
 
 def _rank(patches: List[Patch]) -> None:
     """Assign the raw, normalised and combined ranks and order by the last."""
